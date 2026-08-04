@@ -22,10 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from physis.data.dataset import PhysisDataset, load_manifest, select_split, subset_by_study
 from physis.data.masking import build_batch_masks
-from physis.losses.jepa import patch_residual, prediction_loss
-from physis.losses.margin import age_grid, age_sensitivity, margin_loss, sample_distractor_ages
-from physis.losses.vicreg import covariance_loss, variance_loss
-from physis.models.osteojepa import OsteoJEPA, gather_tokens, momentum_at
+from physis.losses.margin import age_grid
+from physis.losses.objective import compute_objective
+from physis.models.osteojepa import OsteoJEPA, momentum_at
 from physis.utils.config import load_config
 from physis.utils.run import resolve_device, setup_run
 
@@ -112,65 +111,26 @@ def main() -> None:
             meta = {k: batch[k].to(device) for k in ("gender", "view", "laterality")}
 
             masks = build_batch_masks(valid, cfg, rng)
-            ctx_idx, ctx_keep = masks["ctx_idx"], masks["ctx_keep"]
-            tgt_idx, tgt_keep = masks["tgt_idx"], masks["tgt_keep"]
-            n_blocks = tgt_idx.shape[1]
-            margin_block = int(rng.integers(n_blocks))
 
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
-                z_full = model.encode_targets(images)
-                z_ctx = model.encode_context(images, ctx_idx, ctx_keep)
-                cond = model.condition_vector(age, meta)
-
-                loss_pred = images.new_zeros(())
-                residual_for_margin = None
-                z_tgt_for_margin = None
-                for b in range(n_blocks):
-                    idx_b, keep_b = tgt_idx[:, b], tgt_keep[:, b]
-                    z_tgt = gather_tokens(z_full, idx_b)
-                    pred = model.predict(z_ctx, ctx_idx, ctx_keep, idx_b, keep_b, cond)
-                    residual = patch_residual(pred, z_tgt)
-                    loss_pred = loss_pred + prediction_loss(residual, keep_b)
-                    if b == margin_block:
-                        residual_for_margin = residual
-                        z_tgt_for_margin = z_tgt
-                loss_pred = loss_pred / n_blocks
-
-                loss_var, std_per_dim = variance_loss(z_ctx, ctx_keep)
-                loss_cov = covariance_loss(z_ctx, ctx_keep)
-
-                if lambda_margin > 0:
-                    distractors = sample_distractor_ages(
-                        batch["age"].numpy(), grid, float(cfg.loss.distractor_tau), rng
-                    )
-                    distractors_t = torch.from_numpy(distractors).to(device)
-                    loss_margin, s_distractor = margin_loss(
-                        model,
-                        z_ctx=z_ctx,
-                        ctx_idx=ctx_idx,
-                        ctx_keep=ctx_keep,
-                        tgt_idx=tgt_idx[:, margin_block],
-                        tgt_keep=tgt_keep[:, margin_block],
-                        z_tgt=z_tgt_for_margin,
-                        meta=meta,
-                        residual_recorded=residual_for_margin,
-                        distractor_ages=distractors_t,
-                        margin=float(cfg.loss.margin_m),
-                    )
-                    all_ages = torch.cat(
-                        [residual_for_margin.unsqueeze(1), s_distractor], dim=1
-                    ).detach()
-                    v_patch = age_sensitivity(all_ages, tgt_keep[:, margin_block])
-                    v_medians.append(float(torch.nanmedian(v_patch)))
-                else:
-                    loss_margin = images.new_zeros(())
-
-                loss = (
-                    loss_pred
-                    + float(cfg.loss.lambda_var) * loss_var
-                    + float(cfg.loss.lambda_cov) * loss_cov
-                    + lambda_margin * loss_margin
+                out = compute_objective(
+                    model,
+                    images=images,
+                    ages=age,
+                    ages_cpu=batch["age"].numpy(),
+                    meta=meta,
+                    masks=masks,
+                    cfg=cfg,
+                    rng=rng,
+                    grid=grid,
+                    use_margin=lambda_margin > 0,
                 )
+
+            loss = out.total
+            loss_pred, loss_var, loss_cov, loss_margin = out.pred, out.var, out.cov, out.margin
+            std_per_dim = out.std_per_dim
+            if out.v_patch is not None:
+                v_medians.append(float(torch.nanmedian(out.v_patch)))
 
             assert torch.isfinite(loss), f"non-finite loss at step {global_step}"
             optimizer.zero_grad(set_to_none=True)

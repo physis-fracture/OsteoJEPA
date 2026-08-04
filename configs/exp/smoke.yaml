@@ -24,6 +24,9 @@ optim:
   num_workers: 0                   # Windows spawn cost dwarfs the gain at this size
 
 inference:
-  age_grid_coarse_step: 4.0        # a coarser sweep; correctness is M4's problem
-  refine_window: 2.0
+  # A coarser sweep over a narrower refinement window. Correctness of the sweep
+  # is M4's problem; here it only has to run, and the refinement window is what
+  # dominates the wall clock because it unions across every patch of an image.
+  age_grid_coarse_step: 4.0
+  refine_window: 1.0
   enforce_min_band_count: false    # 40 images cannot fill 11 bands with 50 each
