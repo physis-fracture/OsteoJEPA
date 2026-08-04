@@ -1,0 +1,11 @@
+# The only difference from base is where the condition vector enters.
+# Step budget, seed, masking, and losses are identical.
+defaults: [../base.yaml]
+run:
+  name: e1b
+condition:
+  inject: encoder
+eval:
+  expectation: delta_near_zero_uniform
+  # If Delta here matches base, the architectural claim in the paper is
+  # unsupported. Nothing that ships changes either way.

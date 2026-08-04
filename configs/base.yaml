@@ -1,0 +1,105 @@
+# OsteoJEPA base configuration. Files in configs/exp/ inherit this one and
+# contain overrides only. That is what makes E1b's "identical step budget and
+# configuration" claim verifiable from the repository.
+
+defaults: [data.yaml]
+
+run:
+  name: base
+  seed: 1337
+  out_dir: runs/${run.name}
+  amp: bf16
+  log_every: 50
+  # Each run writes resolved config, git hash, seed, and metrics to out_dir.
+
+encoder:
+  arch: vit_small_patch16          # dim 384, depth 12, heads 6
+  img_size: 384
+  in_chans: 1
+  init: imagenet
+  timm_name: vit_small_patch16_224.augreg_in21k_ft_in1k
+  # Loading ImageNet weights requires two adjustments:
+  #   1. patch_embed.proj.weight ships as (384, 3, 16, 16). SUM across the
+  #      channel dim to (384, 1, 16, 16). Do not slice one channel.
+  #   2. pos_embed is 14x14 for 224px input; bicubic-interpolate to 24x24.
+
+predictor:
+  depth: 6
+  dim: 384
+  heads: 6
+  film: per_layer
+  film_init: zero_last             # gamma = 1, beta = 0 at step 0
+  # That initialization point coincides with the degenerate solution, which is
+  # why the margin loss is active from step 0 with no warmup.
+
+target_encoder:
+  ema_start: 0.996
+  ema_end: 1.0
+  ema_schedule: linear_over_total_steps
+  # The original I-JEPA schedule assumes 300-800 epochs. Scale it to the steps
+  # actually run, or the target encoder freezes before the predictor uses it.
+
+condition:
+  inject: predictor                # E1b overrides this to: encoder
+  age_fourier_bands: 16
+  fields: [age, sex, view, laterality]
+  unknown_embedding: true          # missing metadata gets its own embedding
+  dim: 128
+
+masking:
+  context_ratio: 0.60
+  n_target_blocks: 4
+  target_block_ratio: 0.15
+  allow_overlap: false
+  exclude_padding: true            # non-negotiable, see data.yaml
+
+loss:
+  lambda_var: 25.0                 # starting point
+  lambda_cov: 1.0                  # starting point
+  lambda_margin: 1.0               # starting point, raise if V(p) stays flat
+  margin_m: 0.10                   # starting point
+  distractor_tau: 3.0
+  distractor_symmetric: true
+  # One distractor age from below, one from above. If a side is empty (toddlers,
+  # late teenagers), take two from the available side. One-sided sampling lets
+  # the predictor win the margin by learning the direction of the age ordering
+  # without touching anatomy.
+  vicreg_on: context_encoder_output
+
+optim:
+  epochs: 100
+  batch_size: 64                   # starting point, verify against VRAM first
+  lr: 5.0e-4                       # starting point
+  min_lr: 1.0e-6
+  warmup_epochs: 10
+  weight_decay: 0.05
+  optimizer: adamw
+  grad_clip: 1.0
+
+monitor:
+  # These two can kill a run early. Check every epoch.
+  age_sensitivity_per_band: true   # V(p) = Var_a s(p, a), per age band
+  age_sensitivity_spatial_map: true
+  var_z_per_dim: true              # partial collapse is invisible in the mean
+  abort_if_V_flat_after_epoch: 10
+
+inference:
+  # Deterministic partition: every patch gets exactly one residual and repeated
+  # calls return identical output.
+  context_partition_k: 4
+  partition_scheme: interleaved_grid
+  age_grid_coarse_step: 2.0
+  age_grid_fine_step: 0.5
+  age_min: 0.5
+  age_max: 19.0
+  refine_window: 2.0
+  lambda_selection: min_tail_width  # argmin over bands of q95(score) - median(score)
+  lambda_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  score_image: q95
+  score_study: max
+  # Order matters: choose lambda on RAW scores first, then compute (mu, sigma)
+  # at the chosen lambda. Reversing this makes lambda selection meaningless.
+
+abort_criteria:
+  # Pre-registered before any results were seen.
+  max_mae_ahat_years: 3.0          # exceeded -> drop the sweep, use lambda = 0

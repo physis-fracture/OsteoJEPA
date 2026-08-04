@@ -1,0 +1,70 @@
+# Physis data facts. Every value here is fixed. Changing any of them requires
+# rerunning the Kaggle preprocessing notebook and discarding all checkpoints.
+
+manifest: data/manifest.csv
+fracture_boxes: data/fracture_boxes.csv
+images_dir: data/images_384
+
+image:
+  size: 384              # square canvas; long side resized, then zero-padded
+  patch: 16              # 24 x 24 = 576 tokens, ~43% of them padding
+  channels: 1
+  bit_depth: 16
+  clip_percentile: [1.0, 99.0]
+
+# Manifest columns defining preprocessing geometry.
+# Patch (i, j) is valid iff its whole box lies inside the content area:
+#   16*i >= pad_x  and  16*(i+1) <= pad_x + new_w
+#   16*j >= pad_y  and  16*(j+1) <= pad_y + new_h
+# Mean valid fraction is ~0.57. Padding patches MUST be excluded from context
+# sampling, target sampling, the surprise map, and every statistic.
+geometry_cols: [pad_x, pad_y, new_w, new_h, scale]
+
+split:
+  n_folds: 5
+  seed: 1337
+  test_fold: 0
+  val_fold: 1
+  group_col: patient_id
+  # Assert on load that no patient appears in more than one split.
+
+clean_set:
+  column: clean_strict
+  # 5,639 images from 2,671 patients; 3,382 of them in the training fold.
+  # clean_loose keeps cast but adds only 33 images, so it is unused.
+  n_total: 5639
+  n_train: 3382
+  n_val: 1100
+
+# Age bands for (mu_a, sigma_a) and for every age-stratified table.
+# Widths are uneven because each single year below age 9 holds fewer than 50
+# clean validation images. Comments give clean validation counts.
+age_bands:
+  - {name: "0-6",   lo: 0.0,  hi: 6.999}   # 96
+  - {name: "7-8",   lo: 7.0,  hi: 8.999}   # 85
+  - {name: "9",     lo: 9.0,  hi: 9.999}   # 67
+  - {name: "10",    lo: 10.0, hi: 10.999}  # 133
+  - {name: "11",    lo: 11.0, hi: 11.999}  # 128
+  - {name: "12",    lo: 12.0, hi: 12.999}  # 137
+  - {name: "13",    lo: 13.0, hi: 13.999}  # 115
+  - {name: "14",    lo: 14.0, hi: 14.999}  # 84
+  - {name: "15",    lo: 15.0, hi: 15.999}  # 96
+  - {name: "16",    lo: 16.0, hi: 16.999}  # 82
+  - {name: "17-19", lo: 17.0, hi: 19.001}  # 77
+min_band_count: 50       # assert when computing normalization statistics
+
+patch_labels:
+  # Coverage, not IoU. Fracture boxes have a median area of 5.3 patches, so IoU
+  # against a 16x16 patch is always small and uninformative.
+  positive_coverage: 0.50
+  ambiguous_range: [0.0, 0.50]     # discarded from evaluation
+  negative_margin_patches: 2       # min distance of primary negatives from any box
+  report_thresholds: [0.25, 0.50, 0.75]
+
+augment:
+  # Conservative. Horizontal flip changes laterality, and laterality is one of
+  # the condition vector fields.
+  hflip: false
+  rotate_deg: 5
+  translate_frac: 0.02
+  brightness_contrast: 0.1

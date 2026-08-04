@@ -1,0 +1,14 @@
+# Leave-age-band-out. A middle band, not an edge band: Fourier features at the
+# range edges require extrapolation, which would mix a trajectory failure with a
+# positional encoding failure in a single number.
+defaults: [../base.yaml]
+run:
+  name: e2_hold_9_11
+data:
+  exclude_age_band: [9.0, 12.0]    # removed from pretraining, used for testing
+eval:
+  test_on_excluded_band: true
+  baseline:
+    # The comparator detector is retrained without the same band so both models
+    # face identical data scarcity.
+    retrain_without_band: true

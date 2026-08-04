@@ -219,3 +219,7 @@ __marimo__/
 
 # Dataset
 dataset/*.zip
+
+# Agents
+.agents/*
+CLAUDE.md

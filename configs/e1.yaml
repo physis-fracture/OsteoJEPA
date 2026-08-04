@@ -1,0 +1,24 @@
+# E1 uses the base checkpoint. No training here, only inference and metrics.
+defaults: [../base.yaml]
+run:
+  name: e1
+eval:
+  checkpoint: runs/base/checkpoints/best.pt
+  prerequisites:
+    report_V_per_band: true
+    report_V_spatial_map: true     # localized to physes = real; uniform = empty offset
+    report_mae_ahat: true
+  patch_task:
+    metrics: [auroc, auprc]
+    stratify_by: age_band
+    lambda_ablation: true
+    coverage_thresholds: [0.25, 0.50, 0.75]
+  comparator_group:
+    # GRAZPEDWRI-DX does not annotate growth plates, so the developmental
+    # variant group is built from the residuals themselves.
+    source: clean_val
+    rule: top_residual_percentile
+    percentile: 5
+    measured_at_lambda: 0.0
+    report: delta_distribution_vs_fracture_patches
+    qualitative_crops: 8
