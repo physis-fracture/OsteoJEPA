@@ -136,11 +136,16 @@ class PhysisDataset(Dataset):
         self.augment = augment
         self.aug_cfg = data_cfg.augment
         self.seed = seed
+        assert not bool(self.aug_cfg.hflip), (
+            "hflip is disabled by design: it changes laterality, and laterality is "
+            "one of the condition vector fields"
+        )
 
     def __len__(self) -> int:
         return len(self.df)
 
-    def __getitem__(self, index: int) -> dict:
+    def read_image(self, index: int) -> tuple[np.ndarray, np.ndarray]:
+        """Raw image in [0, 1] and its geometry-derived valid mask, unaugmented."""
         row = self.df.iloc[index]
         path = self.images_dir / f"{row['stem']}.png"
         with Image.open(path) as im:
@@ -148,14 +153,18 @@ class PhysisDataset(Dataset):
         assert arr.dtype == np.uint16, f"expected a 16-bit PNG, got {arr.dtype} at {path}"
         assert arr.shape == (self.size, self.size), f"unexpected image shape {arr.shape}"
         image = arr.astype(np.float32) / 65535.0
-
         valid = valid_mask_from_geometry(
             row["pad_x"], row["pad_y"], row["new_w"], row["new_h"],
             size=self.size, patch=self.patch,
         )
+        return image, valid
+
+    def __getitem__(self, index: int) -> dict:
+        row = self.df.iloc[index]
+        image, valid = self.read_image(index)
 
         if self.augment:
-            image = self._photometric(image, valid, index)
+            image, valid = self._augment(image, row, index)
 
         return {
             "image": torch.from_numpy(image)[None],           # (1, 384, 384)
@@ -169,22 +178,66 @@ class PhysisDataset(Dataset):
             "index": index,
         }
 
-    def _photometric(self, image: np.ndarray, valid: np.ndarray, index: int) -> np.ndarray:
-        """Brightness/contrast jitter applied to content pixels only.
+    def _augment(self, image: np.ndarray, row, index: int) -> tuple[np.ndarray, np.ndarray]:
+        """Rotation, translation, and photometric jitter, with the mask following.
 
-        Padding must stay exactly zero, otherwise the "empty" patches stop being
-        identifiable from the pixels alone. Rotation and translation are not
-        applied here: both move the content box, which would invalidate the
-        geometry-derived valid_mask. Wiring them up means recomputing the mask
-        under the same transform, and that belongs to M1, not to the skeleton.
+        Rotation and translation move the content box, so the valid mask cannot
+        be read off the manifest geometry afterwards. A pixel-level content mask
+        is therefore carried through the *same* affine transform and the patch
+        mask is re-derived from it: a patch is valid only when all 16x16 of its
+        pixels are still fully inside the transformed content. That keeps the
+        whole-box rule intact under an arbitrary transform, where an
+        axis-aligned formula would quietly start admitting padding.
+
+        Conservative on purpose. Horizontal flip is not offered at all, because
+        it changes laterality and laterality is a condition vector field.
         """
-        rng = np.random.default_rng(self.seed * 1_000_003 + index)
+        rng = np.random.default_rng((self.seed * 1_000_003 + index) % (2**32))
+        content = content_pixel_mask(
+            row["pad_x"], row["pad_y"], row["new_w"], row["new_h"], size=self.size
+        )
+
+        angle = float(rng.uniform(-1, 1) * float(self.aug_cfg.rotate_deg))
+        shift = float(self.aug_cfg.translate_frac) * self.size
+        translate = (float(rng.uniform(-1, 1) * shift), float(rng.uniform(-1, 1) * shift))
+
+        if angle != 0.0 or translate != (0.0, 0.0):
+            image = _affine(image, angle, translate)
+            content = _affine(content.astype(np.float32), angle, translate)
+
+        # Interpolation blurs the content edge; require a patch to be entirely
+        # inside before calling it valid.
+        blocks = content.reshape(self.grid, self.patch, self.grid, self.patch)
+        valid = blocks.min(axis=(1, 3)) >= 1.0 - 1e-3
+
         amount = float(self.aug_cfg.brightness_contrast)
-        if amount <= 0:
-            return image
-        gain = 1.0 + rng.uniform(-amount, amount)
-        bias = rng.uniform(-amount, amount)
-        content = np.repeat(np.repeat(valid, self.patch, axis=0), self.patch, axis=1)
-        out = image.copy()
-        out[content] = np.clip(image[content] * gain + bias, 0.0, 1.0)
-        return out
+        if amount > 0:
+            gain = 1.0 + float(rng.uniform(-amount, amount))
+            bias = float(rng.uniform(-amount, amount))
+            inside = content >= 1.0 - 1e-3
+            image = image.copy()
+            image[inside] = np.clip(image[inside] * gain + bias, 0.0, 1.0)
+        # Padding must stay exactly zero; otherwise "empty" patches stop being
+        # identifiable from the pixels alone.
+        image = np.where(content >= 1.0 - 1e-3, image, 0.0).astype(np.float32)
+        return image, valid
+
+
+def content_pixel_mask(
+    pad_x: float, pad_y: float, new_w: float, new_h: float, size: int = 384
+) -> np.ndarray:
+    """Pixel-level mask of the non-padding region, indexed [y, x]."""
+    mask = np.zeros((size, size), dtype=bool)
+    y0, y1 = int(round(pad_y)), int(round(pad_y + new_h))
+    x0, x1 = int(round(pad_x)), int(round(pad_x + new_w))
+    mask[y0:y1, x0:x1] = True
+    return mask
+
+
+def _affine(array: np.ndarray, angle_deg: float, translate: tuple[float, float]) -> np.ndarray:
+    """Rotate about the centre and translate, filling outside with zero."""
+    image = Image.fromarray(array.astype(np.float32), mode="F")
+    out = image.rotate(
+        angle_deg, resample=Image.BILINEAR, translate=translate, fillcolor=0.0
+    )
+    return np.asarray(out, dtype=np.float32)

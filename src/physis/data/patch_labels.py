@@ -94,3 +94,31 @@ def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
 
 def boxes_for_stem(boxes_df: pd.DataFrame, stem: str) -> pd.DataFrame:
     return boxes_df[boxes_df["stem"] == stem]
+
+
+def load_boxes(cfg) -> pd.DataFrame:
+    """Load `fracture_boxes.csv`.
+
+    Coordinates are already in 384-space, so no transformation happens at
+    training time and there is no second place for the geometry to be applied
+    wrongly.
+    """
+    frame = pd.read_csv(cfg.fracture_boxes)
+    required = ["stem", "x0", "y0", "x1", "y1"]
+    missing = [c for c in required if c not in frame.columns]
+    assert not missing, f"fracture_boxes.csv is missing columns: {missing}"
+    size = int(cfg.image.size)
+    assert frame[["x0", "y0", "x1", "y1"]].to_numpy().max() <= size + 1e-6, (
+        "box coordinates fall outside the 384 canvas; they are expected in 384-space"
+    )
+    assert (frame["x1"] > frame["x0"]).all() and (frame["y1"] > frame["y0"]).all()
+    return frame
+
+
+def boxes_by_stem(boxes_df: pd.DataFrame) -> dict[str, np.ndarray]:
+    """Group boxes into {stem: (n, 4) array} once, instead of filtering per image."""
+    grouped: dict[str, np.ndarray] = {}
+    columns = ["x0", "y0", "x1", "y1"]
+    for stem, chunk in boxes_df.groupby("stem", sort=False):
+        grouped[str(stem)] = chunk[columns].to_numpy(dtype=np.float64)
+    return grouped

@@ -187,18 +187,21 @@ def main() -> None:
                 )
             )
 
-            totals["loss"] += float(loss)
-            totals["pred"] += float(loss_pred)
-            totals["var"] += float(loss_var)
-            totals["cov"] += float(loss_cov)
-            totals["margin"] += float(loss_margin)
+            totals["loss"] += float(loss.detach())
+            totals["pred"] += float(loss_pred.detach())
+            totals["var"] += float(loss_var.detach())
+            totals["cov"] += float(loss_cov.detach())
+            totals["margin"] += float(loss_margin.detach())
             if std_per_dim.numel():
                 std_mins.append(float(std_per_dim.min()))
             step_times.append(time.perf_counter() - step_start)
             global_step += 1
 
             if global_step % int(cfg.run.log_every) == 0:
-                log.info("step %d/%d loss %.4f lr %.2e", global_step, total_steps, float(loss), lr)
+                log.info(
+                    "step %d/%d loss %.4f lr %.2e",
+                    global_step, total_steps, float(loss.detach()), lr,
+                )
 
         record = {
             "epoch": epoch,
