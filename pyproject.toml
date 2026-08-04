@@ -1,0 +1,31 @@
+[project]
+name = "physis"
+version = "0.1.0"
+description = "Physis / OsteoJEPA - age-conditioned predictive representations for pediatric wrist fracture triage"
+requires-python = ">=3.10"
+dependencies = [
+    # torch >= 2.7 is required for Blackwell (sm_120, RTX 5080/5090) support.
+    # Local CPU install:  uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+    # vast.ai CUDA 12.8:  uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+    "torch>=2.7",
+    "timm>=1.0.9",
+    "omegaconf>=2.3",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "pillow>=10.3",
+    "scikit-learn>=1.5",
+    "matplotlib>=3.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

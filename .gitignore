@@ -218,7 +218,15 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Dataset
-dataset/*.zip
+dataset
+data/annot_sample
+data/images_384
+data/age_band_counts.csv
+data/fracture_boxes.csv
+data/manifest.csv
+data/README.md
+data/summary.json
+runs
 
 # Agents
 .agents/*
@@ -226,3 +234,5 @@ CLAUDE.md
 
 # Docs
 docs/fasel_tamvan_FinalPaper.pdf
+# Extracted dataset (lives on Hugging Face) and run outputs
+runs/

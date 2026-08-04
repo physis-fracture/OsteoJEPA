@@ -1,0 +1,29 @@
+# M0 smoke path: the whole pipeline on a tiny model, so a pipeline bug is found
+# before a single GPU-hour is spent. Nothing here is expected to be correct, only
+# to run: dataset -> valid_mask -> pretraining -> age sweep -> score -> r_study.
+#
+# Overrides only, like every other file in configs/exp/.
+defaults: [../base.yaml]
+
+run:
+  name: smoke
+
+encoder:
+  depth: 2                         # 2-layer ViT; ImageNet weights still loaded
+predictor:
+  depth: 2
+
+data:
+  subset_train: 160                # 160 clean train + 40 val = the 200 images of M0
+  subset_val: 40
+
+optim:
+  epochs: 2
+  batch_size: 4
+  warmup_epochs: 0
+  num_workers: 0                   # Windows spawn cost dwarfs the gain at this size
+
+inference:
+  age_grid_coarse_step: 4.0        # a coarser sweep; correctness is M4's problem
+  refine_window: 2.0
+  enforce_min_band_count: false    # 40 images cannot fill 11 bands with 50 each

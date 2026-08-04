@@ -12,8 +12,17 @@ run:
   log_every: 50
   # Each run writes resolved config, git hash, seed, and metrics to out_dir.
 
+data:
+  # Subset sizes for the smoke path. 0 means "use the whole split". Studies are
+  # kept intact when subsetting, so r_study still aggregates over more than one
+  # image.
+  subset_train: 0
+  subset_val: 0
+  augment: false                   # geometry-changing augs land in M1
+
 encoder:
   arch: vit_small_patch16          # dim 384, depth 12, heads 6
+  depth: 12
   img_size: 384
   in_chans: 1
   init: imagenet
@@ -75,6 +84,8 @@ optim:
   weight_decay: 0.05
   optimizer: adamw
   grad_clip: 1.0
+  num_workers: 4
+  device: auto
 
 monitor:
   # These two can kill a run early. Check every epoch.
@@ -97,6 +108,8 @@ inference:
   lambda_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
   score_image: q95
   score_study: max
+  enforce_min_band_count: true      # assert >= data.min_band_count per band
+  batch_size: 8
   # Order matters: choose lambda on RAW scores first, then compute (mu, sigma)
   # at the chosen lambda. Reversing this makes lambda selection meaningless.
 

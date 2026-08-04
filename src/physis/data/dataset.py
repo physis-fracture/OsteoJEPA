@@ -1,0 +1,190 @@
+"""Manifest loading, split integrity, and the image dataset.
+
+Assertions over prints (CONVENTIONS): split integrity and the padding rules are
+asserted, because a printed warning scrolls past and a failed assertion stops
+the run.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+from omegaconf import DictConfig
+from PIL import Image
+from torch.utils.data import Dataset
+
+from .geometry import valid_mask_from_geometry
+
+# Condition-vector categoricals. The trailing entry is the trained `unknown`
+# embedding, so an image with missing metadata is scored rather than dropped.
+GENDER_VOCAB = {"M": 0, "F": 1, "O": 2}
+VIEW_VOCAB = {1: 0, 2: 1, 3: 2}
+LATERALITY_VOCAB = {"L": 0, "R": 1}
+GENDER_UNKNOWN = len(GENDER_VOCAB)
+VIEW_UNKNOWN = len(VIEW_VOCAB)
+LATERALITY_UNKNOWN = len(LATERALITY_VOCAB)
+
+REQUIRED_COLUMNS = [
+    "stem", "patient_id", "study_id", "age", "gender", "projection", "laterality",
+    "fold", "split", "clean_strict", "n_fracture_box",
+    "scale", "new_w", "new_h", "pad_x", "pad_y",
+]
+
+
+def load_manifest(cfg: DictConfig, *, verify_counts: bool = True) -> pd.DataFrame:
+    """Load `manifest.csv` and assert the invariants the whole project rests on."""
+    df = pd.read_csv(cfg.manifest)
+
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    assert not missing, f"manifest is missing columns: {missing}"
+
+    # Hard rule 1: the split was fixed once, on patient groups. A random
+    # per-image split would put the same patient in train and test.
+    per_patient_splits = df.groupby("patient_id")["split"].nunique()
+    leaked = int((per_patient_splits > 1).sum())
+    assert leaked == 0, f"{leaked} patients appear in more than one split"
+
+    assert df["age"].notna().all(), "manifest has missing ages"
+
+    if verify_counts:
+        n_clean = int(df["clean_strict"].sum())
+        assert n_clean == int(cfg.clean_set.n_total), (
+            f"clean_strict count is {n_clean}, expected {cfg.clean_set.n_total}. "
+            "The AO classification filter is the usual casualty when the filtering "
+            "code is rewritten; without it 773 occult fractures re-enter the clean set."
+        )
+        n_train = int((df["clean_strict"] & (df["split"] == "train")).sum())
+        assert n_train == int(cfg.clean_set.n_train), (
+            f"clean train count is {n_train}, expected {cfg.clean_set.n_train}"
+        )
+
+    return df
+
+
+def select_split(
+    df: pd.DataFrame, split: str, *, clean_only: bool = False
+) -> pd.DataFrame:
+    """Rows for one split, optionally restricted to the pretraining-clean set."""
+    assert split in {"train", "val", "test"}, f"unknown split {split!r}"
+    out = df[df["split"] == split]
+    if clean_only:
+        out = out[out["clean_strict"]]
+    return out.reset_index(drop=True)
+
+
+def subset_by_study(df: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
+    """Deterministically take about `n` images, keeping every study intact.
+
+    Studies are kept whole so that `r_study = max over images in the study` is
+    exercised on studies that actually hold more than one image.
+    """
+    if n <= 0 or n >= len(df):
+        return df.reset_index(drop=True)
+    studies = df["study_id"].drop_duplicates().sort_values().to_numpy()
+    order = np.random.default_rng(seed).permutation(len(studies))
+    taken, total = [], 0
+    for k in order:
+        study = studies[k]
+        size = int((df["study_id"] == study).sum())
+        if total + size > n and taken:
+            continue
+        taken.append(study)
+        total += size
+        if total >= n:
+            break
+    return df[df["study_id"].isin(taken)].reset_index(drop=True)
+
+
+def build_eval_frame(cfg: DictConfig, split: str = "val") -> pd.DataFrame:
+    """Clean images of one split, subsetted for the smoke path if configured.
+
+    Used by calibration and by scoring so that both see exactly the same images;
+    lambda* and (mu, sigma) would otherwise be estimated on different sets.
+    """
+    manifest = load_manifest(cfg)
+    frame = select_split(manifest, split, clean_only=True)
+    n = int(cfg.data.get(f"subset_{split}", 0) or 0)
+    if n > 0:
+        frame = subset_by_study(frame, n, int(cfg.run.seed))
+    return frame
+
+
+class PhysisDataset(Dataset):
+    """384x384 preprocessed radiographs plus everything the condition vector needs.
+
+    Returns images already in [0, 1]: the PNGs are 16-bit, so they are divided by
+    65535. Reading them as 8-bit would quantise the whole intensity range into
+    256 levels and cost exactly the fine cortical detail the model is meant to see.
+    """
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        data_cfg: DictConfig,
+        *,
+        augment: bool = False,
+        seed: int = 0,
+    ):
+        self.df = df.reset_index(drop=True)
+        self.images_dir = Path(data_cfg.images_dir)
+        self.size = int(data_cfg.image.size)
+        self.patch = int(data_cfg.image.patch)
+        self.grid = self.size // self.patch
+        self.augment = augment
+        self.aug_cfg = data_cfg.augment
+        self.seed = seed
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def __getitem__(self, index: int) -> dict:
+        row = self.df.iloc[index]
+        path = self.images_dir / f"{row['stem']}.png"
+        with Image.open(path) as im:
+            arr = np.array(im)
+        assert arr.dtype == np.uint16, f"expected a 16-bit PNG, got {arr.dtype} at {path}"
+        assert arr.shape == (self.size, self.size), f"unexpected image shape {arr.shape}"
+        image = arr.astype(np.float32) / 65535.0
+
+        valid = valid_mask_from_geometry(
+            row["pad_x"], row["pad_y"], row["new_w"], row["new_h"],
+            size=self.size, patch=self.patch,
+        )
+
+        if self.augment:
+            image = self._photometric(image, valid, index)
+
+        return {
+            "image": torch.from_numpy(image)[None],           # (1, 384, 384)
+            "valid_mask": torch.from_numpy(valid),            # (24, 24) bool, [j, i]
+            "age": torch.tensor(float(row["age"]), dtype=torch.float32),
+            "gender": torch.tensor(GENDER_VOCAB.get(row["gender"], GENDER_UNKNOWN)),
+            "view": torch.tensor(VIEW_VOCAB.get(int(row["projection"]), VIEW_UNKNOWN)),
+            "laterality": torch.tensor(LATERALITY_VOCAB.get(row["laterality"], LATERALITY_UNKNOWN)),
+            "stem": str(row["stem"]),
+            "study_id": str(row["study_id"]),
+            "index": index,
+        }
+
+    def _photometric(self, image: np.ndarray, valid: np.ndarray, index: int) -> np.ndarray:
+        """Brightness/contrast jitter applied to content pixels only.
+
+        Padding must stay exactly zero, otherwise the "empty" patches stop being
+        identifiable from the pixels alone. Rotation and translation are not
+        applied here: both move the content box, which would invalidate the
+        geometry-derived valid_mask. Wiring them up means recomputing the mask
+        under the same transform, and that belongs to M1, not to the skeleton.
+        """
+        rng = np.random.default_rng(self.seed * 1_000_003 + index)
+        amount = float(self.aug_cfg.brightness_contrast)
+        if amount <= 0:
+            return image
+        gain = 1.0 + rng.uniform(-amount, amount)
+        bias = rng.uniform(-amount, amount)
+        content = np.repeat(np.repeat(valid, self.patch, axis=0), self.patch, axis=1)
+        out = image.copy()
+        out[content] = np.clip(image[content] * gain + bias, 0.0, 1.0)
+        return out
