@@ -223,3 +223,6 @@ dataset/*.zip
 # Agents
 .agents/*
 CLAUDE.md
+
+# Docs
+docs/fasel_tamvan_FinalPaper.pdf
