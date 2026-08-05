@@ -10,6 +10,7 @@ run:
   out_dir: runs/${run.name}
   amp: bf16
   log_every: 50
+  checkpoint_every: 5              # a rented GPU box can disappear mid-run
   # Each run writes resolved config, git hash, seed, and metrics to out_dir.
 
 data:
@@ -93,6 +94,11 @@ monitor:
   age_sensitivity_spatial_map: true
   var_z_per_dim: true              # partial collapse is invisible in the mean
   abort_if_V_flat_after_epoch: 10
+  v_flat_growth_factor: 10.0
+  # "Has not moved from its initialization value" needs a number. V(p) is
+  # exactly 0 at step 0 because the FiLM MLP is zero-initialized, so the test is
+  # against the first completed epoch: by epoch 10, median V(p) must have grown
+  # by at least this factor. Below it, raise lambda_margin and restart.
 
 inference:
   # Deterministic partition: every patch gets exactly one residual and repeated

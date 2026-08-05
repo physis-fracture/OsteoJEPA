@@ -31,6 +31,7 @@ class ObjectiveOutput:
     std_per_dim: torch.Tensor
     v_patch: torch.Tensor | None
     predictor_calls: int
+    margin_block: int
 
 
 def compute_objective(
@@ -123,4 +124,5 @@ def compute_objective(
         std_per_dim=std_per_dim,
         v_patch=v_patch,
         predictor_calls=predictor_calls,
+        margin_block=margin_block,
     )

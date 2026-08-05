@@ -90,20 +90,34 @@ class RunContext:
         return path
 
 
-def setup_run(cfg: DictConfig, *, subdir: str | None = None) -> RunContext:
-    """Create runs/<name>/ and record everything needed to reproduce it."""
+def setup_run(cfg: DictConfig, *, subdir: str | None = None, reuse: bool = False) -> RunContext:
+    """Create runs/<name>/ and record everything needed to reproduce it.
+
+    An existing run directory is never overwritten; a timestamp suffix is added
+    instead. `reuse=True` is the one exception and exists for resuming: a run
+    that was interrupted at epoch 40 has to keep appending to the same
+    metrics.json and log.txt, or its loss curve arrives in two pieces with no
+    way to tell they belong together.
+    """
     base = Path(cfg.run.out_dir)
     if subdir:
         base = base / subdir
-    if base.exists():
+    resuming = reuse and base.exists()
+    if base.exists() and not resuming:
         base = base.with_name(f"{base.name}_{datetime.now():%Y%m%d_%H%M%S}")
-    base.mkdir(parents=True)
-    (base / "checkpoints").mkdir()
-    (base / "figures").mkdir()
+    base.mkdir(parents=True, exist_ok=resuming)
+    (base / "checkpoints").mkdir(exist_ok=resuming)
+    (base / "figures").mkdir(exist_ok=resuming)
 
-    save_config(cfg, base / "config.resolved.yaml")
-    (base / "git.txt").write_text(git_state(), encoding="utf-8")
-    (base / "seed.txt").write_text(f"{cfg.run.seed}\n", encoding="utf-8")
+    if not resuming:
+        save_config(cfg, base / "config.resolved.yaml")
+        (base / "git.txt").write_text(git_state(), encoding="utf-8")
+        (base / "seed.txt").write_text(f"{cfg.run.seed}\n", encoding="utf-8")
+    else:
+        # The config of the original run stays authoritative; record that a
+        # resume happened and under which commit.
+        with (base / "git.txt").open("a", encoding="utf-8") as handle:
+            handle.write(f"\n# resumed {datetime.now():%Y-%m-%d %H:%M:%S}\n{git_state()}")
 
     log = _setup_logger(base / "log.txt")
     set_seed(int(cfg.run.seed))

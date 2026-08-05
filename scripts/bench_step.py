@@ -224,6 +224,8 @@ def main() -> None:
                 times.append(elapsed)
         return float(np.median(times)), local
 
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
     without_time, _ = timed(False)
     with_time, trained = timed(True)
     ratio = with_time / without_time
@@ -231,6 +233,28 @@ def main() -> None:
         "per-step time: %.3f s without margin, %.3f s with margin, ratio %.2fx (+%.0f%%)",
         without_time, with_time, ratio, (ratio - 1) * 100,
     )
+
+    # --- throughput and how long the real run would take -----------------------
+    images_per_sec = batch_size / with_time
+    steps_per_epoch = int(cfg.clean_set.n_train) // batch_size
+    total_steps = steps_per_epoch * int(cfg.optim.epochs)
+    projected_hours = total_steps * with_time / 3600.0
+    peak_gib = (
+        torch.cuda.max_memory_allocated() / 2**30 if device.type == "cuda" else float("nan")
+    )
+    log.info(
+        "throughput %.1f img/s | %d clean train images -> %d steps/epoch, %d steps for %d epochs",
+        images_per_sec, int(cfg.clean_set.n_train), steps_per_epoch,
+        total_steps, int(cfg.optim.epochs),
+    )
+    log.info("projected Stage A wall clock: %.1f hours at batch %d", projected_hours, batch_size)
+    if device.type == "cuda":
+        log.info("peak CUDA memory: %.2f GiB", peak_gib)
+    else:
+        log.warning(
+            "measured on CPU: the projection above is not usable for planning. "
+            "Rerun this on the GPU box before committing to the full run."
+        )
     if ratio > 1.7:
         log.warning(
             "per-step time nearly doubled. The margin should add predictor passes only; "
@@ -277,6 +301,11 @@ def main() -> None:
             "sec_per_step_without_margin": without_time,
             "sec_per_step_with_margin": with_time,
             "margin_time_ratio": ratio,
+            "images_per_sec": images_per_sec,
+            "steps_per_epoch_full_run": steps_per_epoch,
+            "total_steps_full_run": total_steps,
+            "projected_hours_full_run": projected_hours,
+            "peak_cuda_gib": peak_gib,
         },
     )
     log.info("all M2 checks passed")

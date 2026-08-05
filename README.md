@@ -31,23 +31,34 @@ Under active development for Datathon 2026 (RISTEK Fasilkom UI), semifinal round
 
 ## Setup
 
+Put `physis_meta.zip` and `physis_images_*.zip` in `dataset/`, then:
+
 ```bash
-uv sync
-cd dataset
-unzip physis_meta.zip -d ../data
-for z in physis_images_*.zip; do unzip "$z" -d ../data; done
+bash scripts/setup_env.sh          # CUDA 12.8 build, for RTX 5080 / 5090
+bash scripts/setup_env.sh --cpu    # CPU build, enough for the smoke path
 ```
 
-Image archives are hosted on Hugging Face; see `.agents/DATA.md`.
+This creates `.venv`, installs pinned dependencies, extracts the archives into
+`data/`, and runs the test suite. Image archives are hosted on Hugging Face; see
+`.agents/DATA.md`.
 
 ## Running
 
 ```bash
-bash scripts/run_e1.sh --smoke   # verify the pipeline in minutes
-bash scripts/run_e1.sh           # age mechanism
-bash scripts/run_e1b.sh          # architecture ablation
-bash scripts/run_e2.sh           # leave-age-band-out
-bash scripts/run_e3.sh           # deployment feasibility, no GPU
+bash scripts/run_e1.sh --smoke     # verify the whole pipeline in minutes
+.venv/bin/python scripts/check_data.py   # geometry, split, patch label checks
+bash scripts/run_base.sh --bench   # 50-step benchmark: throughput and VRAM
+bash scripts/run_base.sh           # Stage A pretraining
+bash scripts/run_e1.sh             # age mechanism
+bash scripts/run_e1b.sh            # architecture ablation
+bash scripts/run_e2.sh             # leave-age-band-out
+bash scripts/run_e3.sh             # deployment feasibility, no GPU
+```
+
+Stage A checkpoints every epoch and can be resumed:
+
+```bash
+bash scripts/run_base.sh --resume runs/base/checkpoints/last.pt
 ```
 
 ## Documentation
