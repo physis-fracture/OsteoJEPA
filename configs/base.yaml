@@ -77,7 +77,7 @@ loss:
   vicreg_on: context_encoder_output
 
 optim:
-  epochs: 100
+  epochs: 300
   batch_size: 64                   # starting point, verify against VRAM first
   lr: 5.0e-4                       # starting point
   min_lr: 1.0e-6
@@ -85,8 +85,12 @@ optim:
   weight_decay: 0.05
   optimizer: adamw
   grad_clip: 1.0
-  num_workers: 4
+  num_workers: 8
   device: auto
+  # Every step decodes batch_size 16-bit PNGs. The benchmark starts its timer
+  # after the batch is in hand, so it cannot see a starved GPU; keep the loader
+  # wide enough that it never becomes the answer. Match this to the `cpu=`
+  # request on the Modal function.
 
 monitor:
   # These two can kill a run early. Check every epoch.
@@ -115,7 +119,11 @@ inference:
   score_image: q95
   score_study: max
   enforce_min_band_count: true      # assert >= data.min_band_count per band
-  batch_size: 8
+  batch_size: 64
+  # The sweep runs without gradients, so its memory footprint is a fraction of
+  # training's, and it is the longest stage: ~100 predictor calls per image over
+  # both folds. Batch size does not affect the result - the refinement window is
+  # unioned per image, never across the batch - so this is free throughput.
   # Order matters: choose lambda on RAW scores first, then compute (mu, sigma)
   # at the chosen lambda. Reversing this makes lambda selection meaningless.
 
