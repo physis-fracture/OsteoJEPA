@@ -19,6 +19,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Deploy tooling, not a runtime dependency: modal_app.py runs on your machine
+# and ships the work to Modal's containers, which build their own image.
+modal = ["modal>=1.5"]
 
 [build-system]
 requires = ["setuptools>=68"]
