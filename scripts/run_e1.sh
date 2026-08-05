@@ -7,6 +7,12 @@
 # The smoke path trains as well as scores, because the point of M0 is to prove
 # that dataset -> valid_mask -> pretraining -> age sweep -> score -> r_study runs
 # end to end before a single GPU-hour is spent on it.
+#
+# The stage order matters and is the same one run_gpu_session.sh uses: sweep
+# first, because s_rec and s_min do not depend on lambda; then choose lambda on
+# those raw scores; then compute (mu, sigma) at the chosen lambda; then
+# normalize. Computing the statistics before lambda is chosen would normalize
+# every candidate by statistics belonging to a different lambda.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -16,7 +22,7 @@ if [ -x ".venv/Scripts/python.exe" ]; then
 elif [ -x ".venv/bin/python" ]; then
   PY=".venv/bin/python"
 else
-  echo "no virtualenv found at .venv - create it with: python -m venv .venv" >&2
+  echo "no virtualenv found at .venv - run: bash scripts/setup_env.sh" >&2
   exit 1
 fi
 
@@ -38,24 +44,33 @@ else
   CHECKPOINT="runs/base/checkpoints/best.pt"
   if [ ! -f "$CHECKPOINT" ]; then
     echo "missing Stage A checkpoint: ${CHECKPOINT}" >&2
-    echo "run M3 first, or use --smoke to exercise the pipeline" >&2
+    echo "run M3 first (bash scripts/run_base.sh), or use --smoke" >&2
     exit 1
   fi
 fi
 
-echo "== Calibration: lambda first, then (mu, sigma) =="
-"$PY" scripts/calibrate.py \
-  --config "$CONFIG" \
-  --checkpoint "$CHECKPOINT" \
-  --run-subdir calibrate \
-  --set "run.name=${RUN_NAME}"
-
-echo "== Age sweep, surprise maps, r_image, r_study =="
+echo "== Age sweep over the validation fold, raw =="
 "$PY" scripts/sweep_score.py \
   --config "$CONFIG" \
   --checkpoint "$CHECKPOINT" \
+  --split val --subset all \
+  --no-normalize \
+  --run-subdir sweep_val \
+  --set "run.name=${RUN_NAME}"
+
+echo "== Calibration: lambda on raw scores, then (mu, sigma) =="
+"$PY" scripts/calibrate.py \
+  --config "$CONFIG" \
+  --from-sweep "${RUN_DIR}/sweep_val/sweep_val_all.npz" \
+  --run-subdir calibrate \
+  --set "run.name=${RUN_NAME}"
+
+echo "== Surprise maps, r_image, r_study =="
+"$PY" scripts/score_from_sweep.py \
+  --config "$CONFIG" \
+  --sweep "${RUN_DIR}/sweep_val/sweep_val_all.npz" \
   --calibration "${RUN_DIR}/calibrate/calibration.json" \
-  --run-subdir score \
+  --run-subdir score_val \
   --set "run.name=${RUN_NAME}"
 
 echo "== Done: ${RUN_DIR} =="

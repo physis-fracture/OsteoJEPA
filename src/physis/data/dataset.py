@@ -98,14 +98,29 @@ def subset_by_study(df: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
     return df[df["study_id"].isin(taken)].reset_index(drop=True)
 
 
-def build_eval_frame(cfg: DictConfig, split: str = "val") -> pd.DataFrame:
-    """Clean images of one split, subsetted for the smoke path if configured.
+EVAL_SUBSETS = ("clean", "fracture", "all")
 
-    Used by calibration and by scoring so that both see exactly the same images;
-    lambda* and (mu, sigma) would otherwise be estimated on different sets.
+
+def build_eval_frame(
+    cfg: DictConfig, split: str = "val", subset: str = "clean"
+) -> pd.DataFrame:
+    """Images of one split, subsetted for the smoke path if configured.
+
+    `clean` is the pretraining-clean set, used for calibration and as the
+    secondary-negative pool. `fracture` is images carrying at least one fracture
+    box, which is where positive patches come from and which the clean set
+    excludes by construction. `all` is both, and is what a single GPU session
+    sweeps so that nothing has to be recomputed later.
+
+    Calibration and scoring share this function so they see exactly the same
+    images; lambda* and (mu, sigma) would otherwise be estimated on different
+    sets.
     """
+    assert subset in EVAL_SUBSETS, f"unknown eval subset {subset!r}"
     manifest = load_manifest(cfg)
-    frame = select_split(manifest, split, clean_only=True)
+    frame = select_split(manifest, split, clean_only=(subset == "clean"))
+    if subset == "fracture":
+        frame = frame[frame["n_fracture_box"] > 0].reset_index(drop=True)
     n = int(cfg.data.get(f"subset_{split}", 0) or 0)
     if n > 0:
         frame = subset_by_study(frame, n, int(cfg.run.seed))

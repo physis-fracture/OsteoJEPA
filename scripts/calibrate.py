@@ -29,27 +29,52 @@ from physis.utils.run import resolve_device, setup_run
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="lambda selection and band statistics")
     parser.add_argument("--config", required=True)
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint", default=None, help="not needed with --from-sweep")
+    parser.add_argument(
+        "--from-sweep",
+        default=None,
+        help=(
+            "a sweep_*.npz written by sweep_score.py. s_rec, s_min and a_hat do "
+            "not depend on lambda, so calibration can be redone from the archive "
+            "without touching a GPU. E3's recalibration budget needs exactly that."
+        ),
+    )
     parser.add_argument("--set", nargs="*", default=[])
     parser.add_argument("--run-subdir", default="calibrate")
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    cfg = load_config(args.config, args.set)
-    run = setup_run(cfg, subdir=args.run_subdir)
-    log = run.log
+def collect_from_sweep(path: str, log) -> tuple[PatchScores, list[float], list[float]]:
+    """Rebuild the calibration inputs from a saved sweep, clean images only."""
+    archive = np.load(path, allow_pickle=False)
+    clean = archive["clean"]
+    log.info("loaded %s: %d images, %d clean", path, len(clean), int(clean.sum()))
+    assert clean.any(), "the archive holds no clean images; calibration needs them"
 
-    device = resolve_device(str(cfg.optim.device))
-    bands = band_list(cfg)
+    scores = PatchScores(s_rec=[], delta=[], band=[])
+    ages_recorded, ages_hat = [], []
+    for index in np.flatnonzero(clean):
+        valid = archive["valid"][index]
+        if not valid.any():
+            continue
+        s_rec = archive["s_rec"][index][valid]
+        s_min = archive["s_min"][index][valid]
+        scores.s_rec.append(s_rec)
+        scores.delta.append(s_rec - s_min)
+        scores.band.append(int(archive["band"][index]))
+        ages_recorded.append(float(archive["age"][index]))
+        ages_hat.append(float(np.median(archive["a_hat"][index][valid])))
+    return scores, ages_recorded, ages_hat
 
-    frame = build_eval_frame(cfg, "val")
+
+def collect_from_model(cfg, checkpoint: str, bands, log):
+    """Run the age sweep over the clean validation images."""
+    frame = build_eval_frame(cfg, "val", "clean")
     log.info("clean validation images: %d", len(frame))
     dataset = PhysisDataset(frame, cfg, augment=False)
     loader = DataLoader(dataset, batch_size=int(cfg.inference.batch_size), shuffle=False)
-
-    model = load_osteojepa(cfg, args.checkpoint, device)
+    device = resolve_device(str(cfg.optim.device))
+    model = load_osteojepa(cfg, checkpoint, device)
 
     scores = PatchScores(s_rec=[], delta=[], band=[])
     ages_recorded, ages_hat = [], []
@@ -66,6 +91,21 @@ def main() -> None:
             ages_recorded.append(age)
             # a_hat of the image is the median over its valid patches.
             ages_hat.append(float(np.nanmedian(result["a_hat"][b])))
+    return scores, ages_recorded, ages_hat
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = load_config(args.config, args.set)
+    run = setup_run(cfg, subdir=args.run_subdir)
+    log = run.log
+
+    bands = band_list(cfg)
+    assert args.from_sweep or args.checkpoint, "pass either --from-sweep or --checkpoint"
+    if args.from_sweep:
+        scores, ages_recorded, ages_hat = collect_from_sweep(args.from_sweep, log)
+    else:
+        scores, ages_recorded, ages_hat = collect_from_model(cfg, args.checkpoint, bands, log)
 
     assert scores.s_rec, "the sweep produced no valid patches"
 
