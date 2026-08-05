@@ -236,3 +236,4 @@ CLAUDE.md
 docs/fasel_tamvan_FinalPaper.pdf
 # Extracted dataset (lives on Hugging Face) and run outputs
 runs/
+artifacts
