@@ -50,10 +50,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def check_imagenet_load(model: OsteoJEPA, cfg, log) -> dict:
-    """Compare the loaded encoder against the original timm checkpoint."""
+    """Compare the loaded encoder against the original timm checkpoint.
+
+    The model is already on the accelerator by this point while the reference is
+    freshly built on the CPU, so everything is compared on the CPU. Both tensors
+    have to be on one device for `allclose`, and moving the small reference is
+    cheaper than moving the model back.
+    """
     source = timm.create_model(str(cfg.encoder.timm_name), pretrained=True, num_classes=0)
-    original = source.state_dict()["patch_embed.proj.weight"]
-    loaded = model.encoder.net.patch_embed.proj.weight.detach()
+    original = source.state_dict()["patch_embed.proj.weight"].cpu()
+    loaded = model.encoder.net.patch_embed.proj.weight.detach().cpu()
 
     summed = original.sum(dim=1, keepdim=True)
     sliced = original[:, :1]
@@ -61,13 +67,13 @@ def check_imagenet_load(model: OsteoJEPA, cfg, log) -> dict:
     slice_gap = float((loaded - sliced).abs().max())
     assert slice_gap > 1e-3, "sum and slice are indistinguishable here; the check proves nothing"
 
-    pos = model.encoder.net.pos_embed.detach()
+    pos = model.encoder.net.pos_embed.detach().cpu()
     assert pos.shape == (1, 576, model.encoder.embed_dim), f"pos_embed shape {tuple(pos.shape)}"
     assert float(pos.abs().sum()) > 0, "pos_embed is all zeros; interpolation dropped the weights"
 
     # A block that was actually loaded, versus a freshly initialised predictor.
-    block_weight = model.encoder.net.blocks[0].attn.qkv.weight.detach()
-    source_block = source.state_dict()["blocks.0.attn.qkv.weight"]
+    block_weight = model.encoder.net.blocks[0].attn.qkv.weight.detach().cpu()
+    source_block = source.state_dict()["blocks.0.attn.qkv.weight"].cpu()
     assert torch.allclose(block_weight, source_block, atol=1e-6), "block 0 was not loaded"
 
     log.info(
@@ -185,12 +191,12 @@ def main() -> None:
     def timed(use_margin: bool):
         torch.manual_seed(int(cfg.run.seed))
         local = OsteoJEPA(cfg).to(device)
-        optimizer = torch.optim.AdamW(
+        local_trainable = (
             list(local.encoder.parameters())
             + list(local.predictor.parameters())
-            + list(local.condition.parameters()),
-            lr=float(cfg.optim.lr),
+            + list(local.condition.parameters())
         )
+        optimizer = torch.optim.AdamW(local_trainable, lr=float(cfg.optim.lr))
         rng = np.random.default_rng(int(cfg.run.seed))
         times: list[float] = []
         iterator = iter(loader)
@@ -213,7 +219,10 @@ def main() -> None:
                 )
             optimizer.zero_grad(set_to_none=True)
             out.total.backward()
-            torch.nn.utils.clip_grad_norm_(trainable, float(cfg.optim.grad_clip))
+            # `local`, not the outer model: clipping the outer parameters would
+            # touch tensors that never received a gradient here, so the timed
+            # step would silently skip work the real training loop does.
+            torch.nn.utils.clip_grad_norm_(local_trainable, float(cfg.optim.grad_clip))
             optimizer.step()
             local.ema_update(momentum_at(step, 100, 0.996, 1.0))
             if device.type == "cuda":
