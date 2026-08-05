@@ -34,11 +34,15 @@ APP_NAME = "physis"
 HOUR = 3600
 ROOT = "/root"
 
-# A100-40GB fits batch 64 with room to spare (peak is around 9 GiB at 384px on
-# ViT-S/16). Raise to "H100" for speed or drop to "L40S" for cost; the benchmark
-# stage prints peak memory either way, so the batch size is a measurement rather
-# than a guess.
+# Measured on A100-40GB: peak 14.23 GiB at batch 64, 347 img/s, margin cost
+# ratio 1.09x. A 16 GB card would be uncomfortably tight. Raise to "H100" for
+# speed; the benchmark stage prints peak memory either way, so the batch size is
+# a measurement rather than a guess.
+#
+# 8 CPUs per GPU function: every training step decodes batch_size 16-bit PNGs,
+# and a starved dataloader would make every other optimization irrelevant.
 GPU = "A100-40GB"
+CPUS = 8.0
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -138,13 +142,13 @@ def extract_data() -> dict:
     return {"images": images}
 
 
-@app.function(volumes=VOLUMES, timeout=HOUR, cpu=8.0)
+@app.function(volumes=VOLUMES, timeout=HOUR, cpu=CPUS)
 def check_data() -> None:
     name = f"data_check_{int(time.time())}"
     run_script("check_data.py", ["--config", f"{ROOT}/configs/base.yaml", "--set", *overrides(name)])
 
 
-@app.function(gpu=GPU, volumes=VOLUMES, timeout=HOUR)
+@app.function(gpu=GPU, volumes=VOLUMES, timeout=HOUR, cpu=CPUS)
 def smoke() -> None:
     """The whole pipeline on a 2-layer model, before any GPU-hour is committed."""
     config = f"{ROOT}/configs/exp/smoke.yaml"
@@ -170,7 +174,7 @@ def smoke() -> None:
     )
 
 
-@app.function(gpu=GPU, volumes=VOLUMES, timeout=HOUR)
+@app.function(gpu=GPU, volumes=VOLUMES, timeout=HOUR, cpu=CPUS)
 def benchmark(steps: int = 50) -> None:
     """Throughput, peak VRAM, and the margin-loss cost ratio."""
     run_script(
@@ -180,7 +184,7 @@ def benchmark(steps: int = 50) -> None:
     )
 
 
-@app.function(gpu=GPU, volumes=VOLUMES, timeout=24 * HOUR)
+@app.function(gpu=GPU, volumes=VOLUMES, timeout=24 * HOUR, cpu=CPUS)
 def pretrain(name: str = "base", resume: str = "") -> None:
     """Stage A. 24 hours is Modal's ceiling for one call.
 
@@ -200,7 +204,7 @@ def pretrain(name: str = "base", resume: str = "") -> None:
     run_script("pretrain.py", args)
 
 
-@app.function(gpu=GPU, volumes=VOLUMES, timeout=12 * HOUR)
+@app.function(gpu=GPU, volumes=VOLUMES, timeout=12 * HOUR, cpu=CPUS)
 def sweep(split: str, name: str = "base") -> None:
     """Age sweep over a whole fold, clean and fractured alike.
 
