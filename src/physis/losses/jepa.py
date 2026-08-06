@@ -33,3 +33,22 @@ def masked_mean(values: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
 
 def prediction_loss(residual: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
     return masked_mean(residual, keep)
+
+
+def mean_prediction_baseline(target: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
+    """MSE a predictor would reach by ignoring its input and emitting the mean.
+
+    The reference L_pred has to be read against. Per-dimension variance of the
+    target tokens is exactly what a constant predictor achieves, so
+    `L_pred / baseline` is a skill ratio: below 1 the predictor has learned
+    something, at 1 it has learned nothing, and no amount of watching the loss
+    fall will tell the two apart on its own.
+
+    Logging only the *minimum* Var(z) across dimensions catches a partial
+    collapse but leaves L_pred without a scale, which is how a run can pass every
+    monitor while the prediction task is not being learned at all.
+    """
+    valid = target[keep]
+    if valid.shape[0] < 2:
+        return target.sum() * 0.0 + float("nan")
+    return valid.var(dim=0, unbiased=False).mean()

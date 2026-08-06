@@ -16,7 +16,7 @@ import torch
 from omegaconf import DictConfig
 
 from ..models.osteojepa import gather_tokens
-from .jepa import patch_residual, prediction_loss
+from .jepa import mean_prediction_baseline, patch_residual, prediction_loss
 from .margin import age_sensitivity, margin_loss, sample_distractor_ages
 from .vicreg import covariance_loss, variance_loss
 
@@ -29,6 +29,7 @@ class ObjectiveOutput:
     cov: torch.Tensor
     margin: torch.Tensor
     std_per_dim: torch.Tensor
+    pred_baseline: torch.Tensor
     v_patch: torch.Tensor | None
     predictor_calls: int
     margin_block: int
@@ -66,6 +67,7 @@ def compute_objective(
     cond = model.condition_vector(ages, meta)
 
     loss_pred = images.new_zeros(())
+    baseline = images.new_zeros(())
     residual_for_margin = None
     z_tgt_for_margin = None
     predictor_calls = 0
@@ -76,10 +78,12 @@ def compute_objective(
         predictor_calls += 1
         residual = patch_residual(pred, z_tgt)
         loss_pred = loss_pred + prediction_loss(residual, keep_b)
+        baseline = baseline + mean_prediction_baseline(z_tgt.detach(), keep_b)
         if block == margin_block:
             residual_for_margin = residual
             z_tgt_for_margin = z_tgt
     loss_pred = loss_pred / n_blocks
+    baseline = baseline / n_blocks
 
     loss_var, std_per_dim = variance_loss(z_ctx, ctx_keep)
     loss_cov = covariance_loss(z_ctx, ctx_keep)
@@ -122,6 +126,7 @@ def compute_objective(
         cov=loss_cov,
         margin=loss_margin,
         std_per_dim=std_per_dim,
+        pred_baseline=baseline.detach(),
         v_patch=v_patch,
         predictor_calls=predictor_calls,
         margin_block=margin_block,

@@ -1,0 +1,17 @@
+# Diagnostic probe - 20 epochs, not a result.
+# Question: does closing the aspect-ratio shortcut push the age mechanism onto
+# anatomy? Delta currently concentrates in two stripes at the content border.
+#
+# Compared on `pred_skill_ratio`, never on AUROC: tuning on AUROC would leak
+# fracture labels into a pipeline whose whole claim is that it needs none.
+defaults: [../base.yaml]
+
+run:
+  name: probe_c_erode
+
+optim:
+  epochs: 20
+  warmup_epochs: 2
+
+masking:
+  erode_border_patches: 1
