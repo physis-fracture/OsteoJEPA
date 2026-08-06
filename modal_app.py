@@ -238,6 +238,22 @@ def train_classifier(
     )
 
 
+@app.function(gpu=GPU, volumes=VOLUMES, timeout=2 * HOUR, cpu=CPUS)
+def score_classifier(name: str = "clf_main") -> None:
+    """Re-score a trained classifier keeping logits. Inference only, no training.
+
+    The training run saved sigmoid outputs, which have no float32 resolution
+    left near 1: the top-20% flagged group shares 84 distinct values across 815
+    studies, so a worklist cannot rank what it flags.
+    """
+    run_script(
+        "score_classifier.py",
+        ["--config", f"{ROOT}/configs/base.yaml",
+         "--checkpoint", f"/runs/{name}/checkpoints/best.pt",
+         "--run-subdir", "rescored", "--set", *overrides(name)],
+    )
+
+
 @app.function(gpu=GPU, volumes=VOLUMES, timeout=12 * HOUR, cpu=CPUS)
 def sweep(split: str, name: str = "base") -> None:
     """Age sweep over a whole fold, clean and fractured alike.
