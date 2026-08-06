@@ -237,3 +237,4 @@ docs/fasel_tamvan_FinalPaper.pdf
 # Extracted dataset (lives on Hugging Face) and run outputs
 runs/
 artifacts
+docs/EXPERIMENT_REVISION.md

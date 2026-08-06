@@ -54,6 +54,7 @@ image = (
         "pandas>=2.2",
         "pillow>=10.3",
         "scikit-learn>=1.5",
+        "scipy>=1.13",
         "matplotlib>=3.9",
     )
     .add_local_dir("src", remote_path=f"{ROOT}/src")
@@ -225,9 +226,10 @@ def train_classifier(
     extra = [
         f"classifier.use_condition={str(bool(use_condition)).lower()}",
         f"classifier.split_mode={split_mode}",
-        f"classifier.init_from={init_from}",
         "data.augment=true",
     ]
+    if init_from:
+        extra.append(f"classifier.init_from={init_from}")
     if holdout_bands:
         extra.append("classifier.holdout_bands=[" + holdout_bands + "]")
     run_script(
