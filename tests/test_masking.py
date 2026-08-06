@@ -84,3 +84,41 @@ def test_mask_to_indices_is_row_major():
     mask = np.zeros((24, 24), dtype=bool)
     mask[2, 3] = True  # row j=2, column i=3
     assert mask_to_indices(mask).tolist() == [2 * 24 + 3]
+
+
+@pytest.mark.parametrize("rings", [0, 1, 2])
+@pytest.mark.parametrize("geometry", GEOMETRIES)
+def test_sampling_survives_an_eroded_mask(geometry, rings):
+    """Erosion shrinks the valid region until target blocks can swallow it.
+
+    The regression this guards: a block sampler that fell back to the whole
+    valid mask made the union of four target blocks cover everything, leaving no
+    context, and the disjointness check then fired against a union that no
+    longer matched the surviving targets.
+    """
+    from physis.data.geometry import erode_valid_mask
+
+    valid = erode_valid_mask(valid_mask_from_geometry(*geometry), rings)
+    if not valid.any():
+        pytest.skip("erosion removed every patch for this geometry")
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        context, targets = sample_context_and_targets(valid, CFG, rng)
+        assert context.any()
+        assert not (context & ~valid).any()
+        union = np.zeros_like(valid)
+        for block in targets:
+            assert block.any()
+            assert not (block & ~valid).any()
+            union |= block
+        assert not (context & union).any()
+
+
+def test_block_sampler_never_returns_the_whole_valid_region():
+    from physis.data.masking import _sample_block
+
+    valid = valid_mask_from_geometry(8, 8, 368, 368)
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        block = _sample_block(valid, 0.15, rng)
+        assert block.sum() < valid.sum(), "a target block covered every valid patch"

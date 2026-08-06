@@ -59,7 +59,19 @@ def _sample_block(
             best, best_overlap = block, overlap
         if overlap >= MIN_OVERLAP_FRACTION * h * w and overlap > 0:
             return block
-    return best if best_overlap > 0 else valid.copy()
+    if best_overlap > 0:
+        return best
+
+    # Nothing overlapped in any placement. Fall back to a single valid patch,
+    # never to the whole valid region: a "block" equal to `valid` makes the union
+    # of four target blocks swallow every patch, leaving no context at all. That
+    # is rare on a full mask and common once the mask is eroded, which is how it
+    # stayed hidden.
+    fallback = np.zeros_like(valid)
+    positions = np.flatnonzero(valid.reshape(-1))
+    if positions.size:
+        fallback.reshape(-1)[rng.choice(positions)] = True
+    return fallback
 
 
 def sample_context_and_targets(
@@ -77,30 +89,46 @@ def sample_context_and_targets(
 
     Returns boolean (grid, grid) masks indexed [j, i].
     """
+    assert valid.any(), "image has no valid patches at all"
     n_blocks = int(cfg.masking.n_target_blocks)
     target_masks = [
         _sample_block(valid, float(cfg.masking.target_block_ratio), rng) for _ in range(n_blocks)
     ]
-    target_union = np.zeros_like(valid)
-    for block in target_masks:
-        target_union |= block
+    target_masks = [block for block in target_masks if block.any()]
+    assert target_masks, "no non-empty target block was sampled"
+
+    def union_of(blocks: list[np.ndarray]) -> np.ndarray:
+        out = np.zeros_like(valid)
+        for block in blocks:
+            out |= block
+        return out
+
+    target_union = union_of(target_masks)
+    allow_overlap = bool(cfg.masking.allow_overlap)
 
     context = _sample_block(valid, float(cfg.masking.context_ratio), rng)
-    if not bool(cfg.masking.allow_overlap):
+    if not allow_overlap:
         context = context & ~target_union
 
     if not context.any():
         # Every context patch fell inside a target. Fall back to the whole valid
         # complement rather than returning an empty context.
         context = valid & ~target_union
-    if not context.any():
-        # Pathological: targets cover all valid patches. Give one block back.
-        target_masks = target_masks[:1]
-        context = valid & ~target_masks[0]
+    while not context.any() and len(target_masks) > 1:
+        # Targets cover every valid patch. Drop one and rebuild the union: the
+        # union has to be recomputed here, or the disjointness check below is
+        # made against blocks that are no longer targets and fails on a mask
+        # that is in fact perfectly valid.
+        target_masks = target_masks[:-1]
+        target_union = union_of(target_masks)
+        context = valid & ~target_union
 
-    target_masks = [block for block in target_masks if block.any()]
-    assert target_masks, "no non-empty target block was sampled"
-    assert not (context & target_union).any() or bool(cfg.masking.allow_overlap)
+    assert context.any(), (
+        "no context patch survived; the valid region is too small for "
+        f"context_ratio={cfg.masking.context_ratio} and "
+        f"{n_blocks} target blocks of {cfg.masking.target_block_ratio}"
+    )
+    assert allow_overlap or not (context & target_union).any()
     assert not (context & ~valid).any(), "context escaped the valid region"
     return context, target_masks
 
