@@ -1,0 +1,14 @@
+# Diagnostic probe - 20 epochs, not a result.
+# Question: confirm the diagnosis: L_pred should sit at the mean-prediction
+# baseline, i.e. a skill ratio near 1.0.
+#
+# Compared on `pred_skill_ratio`, never on AUROC: tuning on AUROC would leak
+# fracture labels into a pipeline whose whole claim is that it needs none.
+defaults: [../base.yaml]
+
+run:
+  name: probe_a_baseline
+
+optim:
+  epochs: 20
+  warmup_epochs: 2

@@ -152,7 +152,7 @@ def main() -> None:
 
     for epoch in range(start_epoch, epochs):
         model.train()
-        totals = {k: 0.0 for k in ("loss", "pred", "var", "cov", "margin")}
+        totals = {k: 0.0 for k in ("loss", "pred", "var", "cov", "margin", "baseline")}
         v_medians, std_mins, step_times = [], [], []
         v_by_band: dict[int, list[float]] = {}
         v_spatial_sum = np.zeros(n_tokens, dtype=np.float64)
@@ -206,6 +206,7 @@ def main() -> None:
             totals["var"] += float(out.var.detach())
             totals["cov"] += float(out.cov.detach())
             totals["margin"] += float(out.margin.detach())
+            totals["baseline"] += float(out.pred_baseline)
             if out.std_per_dim.numel():
                 std_mins.append(float(out.std_per_dim.min()))
 
@@ -229,6 +230,11 @@ def main() -> None:
             "lr": lr,
             **{f"loss_{k}": v / steps_per_epoch for k, v in totals.items()},
             "var_z_min_dim": float(np.min(std_mins) ** 2) if std_mins else float("nan"),
+            # Below 1 the predictor beats emitting the mean; at 1 it has learned
+            # nothing, however far the total loss has fallen.
+            "pred_skill_ratio": (
+                totals["pred"] / totals["baseline"] if totals["baseline"] else float("nan")
+            ),
             "v_p_median": float(np.median(v_medians)) if v_medians else float("nan"),
             "v_p_by_band": {
                 bands[index]["name"]: float(np.median(values))
@@ -243,9 +249,12 @@ def main() -> None:
         # would print 0.00000 for both all the way through a healthy run.
         log.info(
             "epoch %d | loss %.4f pred %.4f var %.4f cov %.4f margin %.4f "
+            "| skill %.3f (pred %.3f / mean-baseline %.3f) "
             "| Var(z) min-dim %.3e | median V(p) %.3e | %.3f s/step (%.1f img/s)",
             epoch, record["loss_loss"], record["loss_pred"], record["loss_var"],
-            record["loss_cov"], record["loss_margin"], record["var_z_min_dim"],
+            record["loss_cov"], record["loss_margin"],
+            record["pred_skill_ratio"], record["loss_pred"],
+            record["loss_baseline"], record["var_z_min_dim"],
             record["v_p_median"], record["sec_per_step"], record["images_per_sec"],
         )
 

@@ -62,6 +62,11 @@ masking:
   target_block_ratio: 0.15
   allow_overlap: false
   exclude_padding: true            # non-negotiable, see data.yaml
+  erode_border_patches: 0
+  # Excluding padding patches does not close the aspect-ratio leak SPEC warns
+  # about: the valid patches beside the padding carry the outer edge of the limb,
+  # and limb width in the frame is body size, which is age. Eroding costs valid
+  # area (0.531 -> ~0.45 at one ring), so it is opt-in.
 
 loss:
   lambda_var: 25.0                 # starting point
@@ -126,6 +131,19 @@ inference:
   # unioned per image, never across the batch - so this is free throughput.
   # Order matters: choose lambda on RAW scores first, then compute (mu, sigma)
   # at the chosen lambda. Reversing this makes lambda selection meaningless.
+
+classifier:
+  # The supervised model the product ranks by. Not a contribution; see
+  # docs/EXPERIMENT_REVISION.md for why the score's source changed.
+  use_condition: true              # E2a flips this
+  holdout_bands: []                # E2b fills this, e.g. ["9", "10", "11"]
+  split_mode: grouped              # or random_per_image, for the leakage number
+  init_from: ""                    # a Stage A checkpoint, for the backbone ablation
+  epochs: 15
+  batch_size: 64
+  lr: 1.0e-4                       # fine-tuning an ImageNet backbone, not training one
+  weight_decay: 0.05
+  warmup_epochs: 1
 
 abort_criteria:
   # Pre-registered before any results were seen.

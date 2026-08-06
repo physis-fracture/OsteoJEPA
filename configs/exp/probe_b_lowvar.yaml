@@ -1,0 +1,18 @@
+# Diagnostic probe - 20 epochs, not a result.
+# Question: does the VICReg variance push make the targets unpredictable? At
+# lambda_var 25 every dimension is forced to std >= 1, which is exactly the
+# MSE a constant predictor achieves.
+#
+# Compared on `pred_skill_ratio`, never on AUROC: tuning on AUROC would leak
+# fracture labels into a pipeline whose whole claim is that it needs none.
+defaults: [../base.yaml]
+
+run:
+  name: probe_b_lowvar
+
+optim:
+  epochs: 20
+  warmup_epochs: 2
+
+loss:
+  lambda_var: 1.0

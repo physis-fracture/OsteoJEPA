@@ -73,3 +73,33 @@ def age_band_name(age: float, bands: list) -> str:
 def band_list(cfg: DictConfig) -> list:
     """Reporting bands as plain dicts, from configs/data.yaml."""
     return [{"name": b["name"], "lo": float(b["lo"]), "hi": float(b["hi"])} for b in cfg.age_bands]
+
+
+def erode_valid_mask(mask: np.ndarray, rings: int) -> np.ndarray:
+    """Drop `rings` patches inward from the content boundary.
+
+    Excluding padding patches does not close the aspect-ratio leak the SPEC
+    warns about. The leak is not in the padding itself but in the valid patches
+    beside it: those carry the outer edge of the limb, and the limb's width in
+    the frame is body size, which is age. A predictor can read age off that
+    boundary without ever looking at bone, and the margin loss is satisfied
+    either way.
+
+    Eroding costs valid area - the mean valid fraction falls from 0.531 to about
+    0.45 at one ring - so it is off by default and turned on deliberately.
+    """
+    if rings <= 0:
+        return mask
+    out = mask.copy()
+    for _ in range(rings):
+        shrunk = out.copy()
+        shrunk[1:, :] &= out[:-1, :]
+        shrunk[:-1, :] &= out[1:, :]
+        shrunk[:, 1:] &= out[:, :-1]
+        shrunk[:, :-1] &= out[:, 1:]
+        shrunk[0, :] = False
+        shrunk[-1, :] = False
+        shrunk[:, 0] = False
+        shrunk[:, -1] = False
+        out = shrunk
+    return out
