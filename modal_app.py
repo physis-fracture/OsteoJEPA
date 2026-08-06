@@ -55,6 +55,7 @@ image = (
         "pillow>=10.3",
         "scikit-learn>=1.5",
         "scipy>=1.13",
+        "fastapi[standard]>=0.115",
         "matplotlib>=3.9",
     )
     .add_local_dir("src", remote_path=f"{ROOT}/src")
@@ -299,6 +300,37 @@ def score(split: str, name: str = "base") -> None:
          "--calibration", f"/runs/{name}/calibrate/calibration.json",
          "--run-subdir", f"score_{split}_{int(time.time())}", "--set", *overrides(name)],
     )
+
+
+@app.function(volumes=VOLUMES, timeout=HOUR, cpu=2.0, min_containers=0)
+@modal.concurrent(max_inputs=8)
+@modal.asgi_app()
+def web():
+    """The triage service. Scales to zero between requests.
+
+    Serving from the volume rather than baking the checkpoint into the image
+    means a recalibration is a file write, not a rebuild.
+    """
+    import sys as _sys
+
+    _sys.path.insert(0, f"{ROOT}/src")
+    from physis.serve.api import build_app
+    from physis.serve.scorer import Scorer
+    from physis.utils.config import load_config
+
+    holder: dict = {}
+
+    def factory():
+        if "scorer" not in holder:
+            checkpoint = pathlib.Path("/runs/clf_main/checkpoints/best.pt")
+            calibration = pathlib.Path("/runs/clf_calibration/classifier_calibration.json")
+            if not (checkpoint.exists() and calibration.exists()):
+                return None
+            cfg = load_config(f"{ROOT}/configs/base.yaml", PATH_OVERRIDES)
+            holder["scorer"] = Scorer(cfg, str(checkpoint), str(calibration))
+        return holder["scorer"]
+
+    return build_app(factory)
 
 
 @app.local_entrypoint()

@@ -1,0 +1,164 @@
+"""The HTTP surface, implementing .agents/API_CONTRACT.md.
+
+The two response profiles are enforced here rather than left to client
+discipline. The device claim is computer-aided triage and notification
+(21 CFR 892.2080), which permits prioritizing images but not marking locations
+on the original image, so a client that only ever asks for `triage` cannot leak
+location information into the worklist by accident.
+
+The `radiologist` profile currently adds nothing. OsteoJEPA's surprise map
+returned a null result and a map that does not localize is worse than no map;
+the profile stays in the contract so box localization can fill it later without
+a version bump for clients that already request it.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import os
+import time
+from typing import Any, Literal
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+from .preprocess import UnreadableImage
+from .scorer import AgeRequired, Scorer
+
+
+class ImageIn(BaseModel):
+    image_id: str
+    r2_key: str | None = None
+    content: str | None = None
+    view: int | None = None
+    laterality: Literal["L", "R"] | None = None
+
+
+class StudyIn(BaseModel):
+    study_id: str | None = None
+    profile: Literal["triage", "radiologist"] = "triage"
+    images: list[ImageIn] = Field(default_factory=list)
+    age_years: float | None = None
+    sex: Literal["M", "F", "O"] | None = None
+
+
+def error(status: int, code: str, **extra: Any) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"error": code, **extra})
+
+
+def fetch_object(key: str) -> bytes:
+    """Fetch an uploaded image by object key.
+
+    Configured through PHYSIS_OBJECT_BASE, an https prefix the key is appended
+    to. Unset means the deployment has no object store wired up, and the
+    contract's 404 is the honest answer: the service cannot read that key.
+    """
+    base = os.environ.get("PHYSIS_OBJECT_BASE")
+    if not base:
+        raise FileNotFoundError("no object store configured")
+    import urllib.request
+
+    with urllib.request.urlopen(base.rstrip("/") + "/" + key.lstrip("/")) as response:
+        return response.read()
+
+
+def resolve_image(image: ImageIn) -> bytes:
+    if bool(image.r2_key) == bool(image.content):
+        raise ValueError("image_source_ambiguous")
+    if image.content:
+        try:
+            return base64.b64decode(image.content, validate=True)
+        except (binascii.Error, ValueError) as err:
+            raise UnreadableImage(str(err)) from err
+    return fetch_object(image.r2_key)
+
+
+def build_app(scorer_factory) -> FastAPI:
+    """`scorer_factory` is a callable returning a Scorer, or None when unloaded."""
+    app = FastAPI(title="Physis triage", version="1.0")
+
+    @app.get("/v1/health")
+    def health():
+        scorer = scorer_factory()
+        if scorer is None:
+            return error(503, "model_unavailable")
+        return {"status": "ok", "model": scorer.model_info()}
+
+    @app.post("/v1/score/study")
+    def score_study(payload: StudyIn):
+        scorer = scorer_factory()
+        if scorer is None:
+            # The client falls back to arrival order for the whole worklist.
+            # Nothing in the clinical workflow may depend on this service.
+            return error(503, "model_unavailable")
+
+        if not payload.study_id:
+            return error(422, "study_id_required")
+        if not payload.images:
+            return error(422, "images_required")
+        try:
+            scorer.band_of(payload.age_years)
+        except AgeRequired as err:
+            # No default age. Scoring against the wrong band silently is worse
+            # than refusing.
+            return error(422, "age_required", detail=str(err))
+
+        prepared = []
+        for image in payload.images:
+            try:
+                prepared.append({
+                    "data": resolve_image(image),
+                    "image_id": image.image_id,
+                    "view": image.view,
+                    "laterality": image.laterality,
+                })
+            except ValueError as err:
+                if str(err) == "image_source_ambiguous":
+                    return error(422, "image_source_ambiguous", image_id=image.image_id)
+                return error(415, "unreadable_image", image_id=image.image_id)
+            except FileNotFoundError:
+                return error(404, "object_not_found", image_id=image.image_id)
+            except Exception:  # noqa: BLE001 - any fetch failure is the same 404
+                return error(404, "object_not_found", image_id=image.image_id)
+
+        # A deadline the service owns, so a slow response becomes a 504 the
+        # client can fall back from rather than a hung worklist. Fetching the
+        # uploads already happened, so the budget covers what is left.
+        budget_ms = float(os.environ.get("PHYSIS_DEADLINE_MS", 30000))
+        started = time.perf_counter()
+        try:
+            result = scorer.score_study(
+                prepared,
+                study_id=payload.study_id,
+                age_years=payload.age_years,
+                sex=payload.sex,
+            )
+        except UnreadableImage as err:
+            return error(415, "unreadable_image", detail=str(err))
+        if (time.perf_counter() - started) * 1000.0 > budget_ms:
+            return error(504, "timeout", budget_ms=budget_ms)
+
+        if payload.profile == "radiologist":
+            # Present and empty on purpose: the field exists in the contract and
+            # currently has nothing truthful to put in it.
+            result["localization"] = None
+            result["localization_note"] = (
+                "not available: the surprise map returned a null result and is "
+                "not shown; see docs/EXPERIMENT_REVISION.md"
+            )
+        return result
+
+    @app.post("/v1/score/image")
+    def score_image(payload: StudyIn):
+        if len(payload.images) != 1:
+            return error(422, "single_image_required")
+        payload.study_id = payload.study_id or payload.images[0].image_id
+        response = score_study(payload)
+        if isinstance(response, JSONResponse):
+            return response
+        response.pop("triage_score", None)
+        return response
+
+    return app

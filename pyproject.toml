@@ -15,6 +15,7 @@ dependencies = [
     "pillow>=10.3",
     "scikit-learn>=1.5",
     "scipy>=1.13",
+    "fastapi[standard]>=0.115",
     "matplotlib>=3.9",
 ]
 
