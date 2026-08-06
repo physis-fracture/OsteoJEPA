@@ -129,6 +129,8 @@ class Scorer:
         assert scored, "a study needs at least one image"
 
         best = max(scored, key=lambda s: s.logit)
+        # Study-level reference for a study-level query. Falling back to the
+        # per-image one would rank a normal two-projection study far too high.
         entry = self.calibration["bands"][band]
         return {
             "study_id": study_id,

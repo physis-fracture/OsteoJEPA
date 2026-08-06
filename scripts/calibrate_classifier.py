@@ -92,14 +92,37 @@ def main() -> None:
     )
 
     clean = val[val["clean_strict"]]
+    # Two references, because the percentile has to be asked at the level it was
+    # built at. The worklist ranks studies and queries with the max over a
+    # study's images; the maximum of ~1.8 draws is stochastically larger than one
+    # draw, so asking a per-image reference put a quarter of entirely normal
+    # studies above the 90th percentile.
+    clean_studies = clean.groupby("study_id").agg(
+        logit=("logit", "max"), band=("band", "first")
+    )
     quantiles = reference_quantiles(
+        clean_studies["logit"].to_numpy(), clean_studies["band"].to_numpy(), len(bands)
+    )
+    quantiles_image = reference_quantiles(
         clean["logit"].to_numpy(), clean["band"].to_numpy(), len(bands)
     )
-    for band, entry in zip(bands, quantiles):
-        log.info("  band %-6s reference from %4d normal images", band["name"], entry["n"])
-        assert entry["n"] >= int(cfg.min_band_count) or not bool(
+    # The >= 50 rule in DATA.md is fixed and is stated per image, so it is
+    # asserted against the per-image reference. The study-level reference has
+    # about 1.8x fewer units by construction; its counts are reported rather than
+    # held to a threshold nobody has fixed.
+    for band, entry, image_entry in zip(bands, quantiles, quantiles_image):
+        log.info(
+            "  band %-6s reference: %4d normal studies, %4d normal images",
+            band["name"], entry["n"], image_entry["n"],
+        )
+        assert image_entry["n"] >= int(cfg.min_band_count) or not bool(
             cfg.inference.enforce_min_band_count
-        ), f"band {band['name']} has only {entry['n']} normal images"
+        ), f"band {band['name']} has only {image_entry['n']} normal images"
+        if entry["n"] < 30:
+            log.warning(
+                "  band %s rests on %d studies; its percentile is coarse",
+                band["name"], entry["n"],
+            )
 
     payload = {
         "checkpoint": args.checkpoint_id,
@@ -110,6 +133,7 @@ def main() -> None:
         "auroc_val_from_saved_probability": auroc_saved,
         "precision_cost_auroc": auroc_logit - auroc_saved,
         "bands": [{"name": b["name"], **q} for b, q in zip(bands, quantiles)],
+        "bands_image": [{"name": b["name"], **q} for b, q in zip(bands, quantiles_image)],
     }
 
     if args.test_scores:
