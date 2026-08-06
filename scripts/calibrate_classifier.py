@@ -64,15 +64,26 @@ def main() -> None:
     before = expected_calibration_error(val["score"].to_numpy(), val["label"].to_numpy())
     after_probs = np.array([to_probability(z, temperature) for z in val["logit"]])
     after = expected_calibration_error(after_probs, val["label"].to_numpy())
-    auroc_before, _ = safe_auroc(val["label"].to_numpy(), val["score"].to_numpy())
+    auroc_saved, _ = safe_auroc(val["label"].to_numpy(), val["score"].to_numpy())
+    auroc_logit, _ = safe_auroc(val["label"].to_numpy(), val["logit"].to_numpy())
     auroc_after, _ = safe_auroc(val["label"].to_numpy(), after_probs)
 
     log.info("temperature T = %.3f", temperature)
     log.info("ECE on val: %.4f -> %.4f", before, after)
-    # A monotone transform cannot move AUROC. If these differ, something other
-    # than temperature scaling has happened.
-    log.info("AUROC on val: %.4f -> %.4f (must be identical)", auroc_before, auroc_after)
-    assert abs(auroc_before - auroc_after) < 1e-9, "temperature scaling changed the ranking"
+    # Temperature scaling is monotone, so it cannot move AUROC. The comparison
+    # has to be logit against temperature-scaled logit; comparing against the
+    # *saved* probability instead measures something else entirely, because
+    # float32 near 1 collapses distinct logits into ties and AUROC scores ties at
+    # half credit. That gap is the cost of the lost precision, not an effect of
+    # the temperature.
+    log.info("AUROC on val: logit %.6f -> scaled %.6f (must be identical)",
+             auroc_logit, auroc_after)
+    assert abs(auroc_logit - auroc_after) < 1e-9, "temperature scaling changed the ranking"
+    log.info(
+        "AUROC from the saved probability was %.6f, %.6f below the logit: that is "
+        "what float32 ties near 1 cost, and why scoring now keeps the logit",
+        auroc_saved, auroc_logit - auroc_saved,
+    )
 
     log.info(
         "usable range: %.1f%% of val probabilities in (0.01, 0.99) before, %.1f%% after",
@@ -96,6 +107,8 @@ def main() -> None:
         "ece_before": before,
         "ece_after": after,
         "auroc_val": auroc_after,
+        "auroc_val_from_saved_probability": auroc_saved,
+        "precision_cost_auroc": auroc_logit - auroc_saved,
         "bands": [{"name": b["name"], **q} for b, q in zip(bands, quantiles)],
     }
 
