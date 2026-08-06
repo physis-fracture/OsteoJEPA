@@ -90,8 +90,8 @@ class Scorer:
     @torch.no_grad()
     def score_image(self, data: bytes | str, *, image_id: str, age_years: float,
                     sex=None, view=None, laterality=None) -> ImageScore:
-        array = load_grayscale(data)
-        prepared = preprocess(array)
+        array, full_scale = load_grayscale(data)
+        prepared = preprocess(array, full_scale)
 
         image = torch.from_numpy(prepared["image"])[None, None].to(self.device)
         valid = torch.from_numpy(prepared["valid_mask"])[None].to(self.device)

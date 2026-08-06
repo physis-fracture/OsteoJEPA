@@ -296,3 +296,13 @@ def test_detection_is_never_wider_than_the_truth():
             continue
         assert found["pad_x"] >= pad_x
         assert found["pad_x"] + found["new_w"] <= pad_x + new_w
+
+
+def test_percentile_never_leaves_the_unit_interval():
+    """A score above every reference value is the 100th percentile, not the 101st."""
+    from physis.serve.calibration import percentile_for
+
+    entry = {"quantiles": np.linspace(-10, 10, 101).tolist()}
+    assert percentile_for(1e6, entry) == 1.0
+    assert percentile_for(-1e6, entry) == 0.0
+    assert 0.0 <= percentile_for(0.0, entry) <= 1.0

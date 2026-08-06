@@ -85,7 +85,10 @@ def percentile_for(logit: float, band_entry: dict) -> float:
     quantiles = band_entry.get("quantiles") or []
     if not quantiles:
         return float("nan")
-    return float(np.searchsorted(np.asarray(quantiles), logit) / (len(quantiles) - 1))
+    # searchsorted returns len(quantiles) for a value above every one of them,
+    # which divides to 1.01 and puts an impossible percentile on the worklist.
+    position = int(np.searchsorted(np.asarray(quantiles), logit))
+    return float(min(position, len(quantiles) - 1) / (len(quantiles) - 1))
 
 
 def to_probability(logit: float, temperature: float) -> float:

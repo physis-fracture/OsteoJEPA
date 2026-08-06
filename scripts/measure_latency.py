@@ -83,7 +83,7 @@ def main() -> None:
 
         from physis.serve.preprocess import load_grayscale, preprocess
 
-        prepared = preprocess(load_grayscale(blob))
+        prepared = preprocess(*load_grayscale(blob))
         if device.type == "cuda":
             torch.cuda.synchronize()
         after_preprocess = time.perf_counter()

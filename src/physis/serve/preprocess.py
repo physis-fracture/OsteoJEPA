@@ -32,8 +32,18 @@ class UnreadableImage(ValueError):
     """The upload could not be decoded, or is not a 2D grayscale-convertible image."""
 
 
-def load_grayscale(data: bytes | str) -> np.ndarray:
-    """Decode bytes or a path to a 2D float array, preserving bit depth."""
+DTYPE_MAX = {"uint8": 255.0, "uint16": 65535.0, "int32": 65535.0}
+
+
+def load_grayscale(data: bytes | str) -> tuple[np.ndarray, float]:
+    """Decode to a 2D float array, plus the full-scale value of its dtype.
+
+    The scale is returned rather than discarded because an already-preprocessed
+    canvas has to be divided by the *dtype* range, exactly as PhysisDataset
+    does. Dividing by the image's own maximum instead rescales every upload by a
+    different factor - contrast the model never saw in training - and the scores
+    come out plausible and wrong.
+    """
     try:
         source = Image.open(data if isinstance(data, str) else _as_stream(data))
         array = np.asarray(source)
@@ -48,7 +58,8 @@ def load_grayscale(data: bytes | str) -> np.ndarray:
         raise UnreadableImage(f"expected a 2D image, got shape {array.shape}")
     if array.size == 0:
         raise UnreadableImage("image is empty")
-    return array.astype(np.float32)
+    full_scale = DTYPE_MAX.get(str(array.dtype), 1.0 if array.dtype.kind == "f" else 255.0)
+    return array.astype(np.float32), float(full_scale)
 
 
 def _as_stream(data: bytes):
@@ -96,7 +107,7 @@ def detect_preprocessed(array: np.ndarray) -> dict | None:
     return {"scale": 1.0, "new_w": new_w, "new_h": new_h, "pad_x": pad_x, "pad_y": pad_y}
 
 
-def preprocess(array: np.ndarray) -> dict:
+def preprocess(array: np.ndarray, full_scale: float = 65535.0) -> dict:
     """Return the padded canvas, its valid patch mask, and the geometry used.
 
     Geometry is returned rather than discarded because the valid mask is derived
@@ -106,11 +117,10 @@ def preprocess(array: np.ndarray) -> dict:
     """
     already = detect_preprocessed(array)
     if already is not None:
-        # Scale to [0, 1] by the dtype range rather than by percentiles: the
-        # clipping already happened, and redoing it over the padding would shift
-        # every intensity.
-        peak = float(array.max()) or 1.0
-        canvas = (array / peak).astype(np.float32)
+        # Divide by the dtype range, matching PhysisDataset exactly. Not by
+        # percentiles - the clipping already happened - and not by this image's
+        # own maximum, which would apply a different contrast to every upload.
+        canvas = (array / full_scale).astype(np.float32)
         return {
             "image": canvas,
             "valid_mask": valid_mask(
