@@ -74,7 +74,14 @@ class DetectionDataset(Dataset):
             "labels": torch.full((len(boxes),), FRACTURE_CLASS, dtype=torch.int64),
             "image_id": torch.tensor([index]),
         }
-        return image.expand(3, -1, -1) if image.ndim == 2 else image, target
+        if image.ndim == 2:
+            # `repeat`, not `expand`. Expand returns a view whose three channels
+            # share one buffer, and pin_memory refuses to write into a tensor
+            # where several elements alias the same address. That only fires on
+            # CUDA, because pin_memory is off on CPU - so a CPU-only smoke test
+            # cannot reach it.
+            image = image.unsqueeze(0).repeat(3, 1, 1)
+        return image.contiguous(), target
 
     def _flip_free_jitter(self, image, boxes, index):
         """Brightness and contrast only.
