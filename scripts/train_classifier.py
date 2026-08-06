@@ -68,6 +68,12 @@ def assign_splits(manifest: pd.DataFrame, mode: str, seed: int) -> pd.DataFrame:
     return out
 
 
+def _optional_path(value) -> str:
+    """Empty, missing, or literally "None" all mean "not set"."""
+    text = "" if value is None else str(value).strip()
+    return "" if text in {"", "None", "null"} else text
+
+
 def make_frame(manifest: pd.DataFrame, split: str, bands: list) -> pd.DataFrame:
     frame = manifest[manifest["split"] == split].reset_index(drop=True)
     frame = frame.assign(
@@ -142,9 +148,13 @@ def main() -> None:
     )
 
     model = build_classifier(cfg).to(device)
-    if str(clf.init_from):
-        info = load_backbone(model, str(clf.init_from))
-        log.info("encoder initialized from %s (%d tensors)", clf.init_from, info["loaded"])
+    # An override written as `classifier.init_from=` resolves to None, and
+    # str(None) is the truthy string "None", which sends torch.load looking for a
+    # file of that name. Normalize before testing.
+    init_from = _optional_path(clf.init_from)
+    if init_from:
+        info = load_backbone(model, init_from)
+        log.info("encoder initialized from %s (%d tensors)", init_from, info["loaded"])
     else:
         log.info("encoder initialized from ImageNet")
 
@@ -199,7 +209,7 @@ def main() -> None:
         )
 
     report = {"split_mode": str(clf.split_mode), "use_condition": bool(clf.use_condition),
-              "holdout_bands": holdout, "init_from": str(clf.init_from), "splits": {}}
+              "holdout_bands": holdout, "init_from": init_from, "splits": {}}
 
     for split in ("val", "test"):
         frame = make_frame(manifest, split, bands)
