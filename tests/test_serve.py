@@ -18,7 +18,12 @@ from PIL import Image
 
 from physis.models.classifier import build_classifier
 from physis.serve.api import build_app
-from physis.serve.preprocess import UnreadableImage, load_grayscale, preprocess
+from physis.serve.preprocess import (
+    UnreadableImage,
+    detect_preprocessed,
+    load_grayscale,
+    preprocess,
+)
 from physis.serve.scorer import AgeRequired, Scorer
 from physis.utils.config import load_config
 
@@ -101,6 +106,13 @@ def test_study_score_is_the_max_over_its_images(client, scorer):
     body = client.post("/v1/score/study", json=payload).json()
     assert len(body["images"]) == 2
     assert body["triage_score"] == max(i["triage_score"] for i in body["images"])
+
+
+def test_root_lists_the_endpoints(client):
+    body = client.get("/").json()
+    assert body["status"] == "ok"
+    assert body["contract"] == "v1"
+    assert any("score/study" in e for e in body["endpoints"])
 
 
 def test_health_reports_provenance(client):
@@ -227,3 +239,60 @@ def test_unreadable_bytes_raise():
 def test_age_outside_the_range_raises(scorer):
     with pytest.raises(AgeRequired):
         scorer.band_of(21.0)
+
+
+# --- already-preprocessed uploads ------------------------------------------
+#
+# The dataset ships 384x384 canvases that have been through this pipeline
+# already. Running it again would recompute the percentile clip over the padding
+# and, far worse, read pad_x and pad_y as zero, marking all 576 patches valid.
+
+
+def padded_canvas(new_w, new_h, value=0.7):
+    canvas = np.zeros((384, 384), dtype=np.float32)
+    pad_x, pad_y = (384 - new_w) // 2, (384 - new_h) // 2
+    canvas[pad_y : pad_y + new_h, pad_x : pad_x + new_w] = value
+    return canvas, pad_x, pad_y
+
+
+@pytest.mark.parametrize("new_w,new_h", [(255, 384), (384, 261), (150, 384)])
+def test_preprocessed_canvas_is_detected_with_its_geometry(new_w, new_h):
+    canvas, pad_x, pad_y = padded_canvas(new_w, new_h)
+    found = detect_preprocessed(canvas)
+    assert found is not None
+    assert (found["pad_x"], found["pad_y"]) == (pad_x, pad_y)
+    assert (found["new_w"], found["new_h"]) == (new_w, new_h)
+
+
+def test_preprocessed_upload_keeps_padding_out_of_the_mask():
+    canvas, pad_x, _ = padded_canvas(255, 384)
+    prepared = preprocess(canvas)
+    assert prepared["geometry"]["already_preprocessed"] is True
+    mask = prepared["valid_mask"]
+    # No valid patch may start before the content does.
+    first_valid_column = int(np.flatnonzero(mask.any(axis=0))[0])
+    assert first_valid_column * 16 >= pad_x
+
+
+def test_a_real_upload_is_not_mistaken_for_a_preprocessed_one():
+    assert detect_preprocessed(np.random.rand(500, 380).astype(np.float32)) is None
+    # A 384 canvas with no zero border cannot be told from an ordinary upload,
+    # and does not need to be: with no padding the normal path already gives
+    # scale 1, pad 0, and every patch valid.
+    assert detect_preprocessed(np.full((384, 384), 0.5, dtype=np.float32)) is None
+    prepared = preprocess(np.full((384, 384), 0.5, dtype=np.float32))
+    assert prepared["geometry"]["pad_x"] == 0
+    assert prepared["valid_mask"].all()
+
+
+def test_detection_is_never_wider_than_the_truth():
+    """Losing an edge patch is acceptable; admitting a padding patch is not."""
+    for new_w in (150, 255, 300, 384):
+        canvas, pad_x, pad_y = padded_canvas(new_w, 384)
+        # Darken the outer content column, as the 1st-percentile clip can.
+        canvas[:, pad_x] = 0.0
+        found = detect_preprocessed(canvas)
+        if found is None:
+            continue
+        assert found["pad_x"] >= pad_x
+        assert found["pad_x"] + found["new_w"] <= pad_x + new_w

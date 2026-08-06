@@ -79,6 +79,27 @@ def build_app(scorer_factory) -> FastAPI:
     """`scorer_factory` is a callable returning a Scorer, or None when unloaded."""
     app = FastAPI(title="Physis triage", version="1.0")
 
+    @app.get("/")
+    def root():
+        """A landing page, so an integrator who guesses the base URL is not met
+        with a bare 404 and left wondering whether the service is up."""
+        scorer = scorer_factory()
+        return {
+            "service": "Physis triage",
+            "contract": "v1",
+            "status": "ok" if scorer is not None else "model_unavailable",
+            "docs": "/docs",
+            "endpoints": [
+                "GET  /v1/health",
+                "POST /v1/score/study",
+                "POST /v1/score/image",
+            ],
+            "note": (
+                "Triage and notification only. This service does not diagnose, "
+                "and the triage profile carries no location information."
+            ),
+        }
+
     @app.get("/v1/health")
     def health():
         scorer = scorer_factory()
