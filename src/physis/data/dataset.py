@@ -16,7 +16,7 @@ from omegaconf import DictConfig
 from PIL import Image
 from torch.utils.data import Dataset
 
-from .geometry import valid_mask_from_geometry
+from .geometry import erode_valid_mask, valid_mask_from_geometry
 
 # Condition-vector categoricals. The trailing entry is the trained `unknown`
 # embedding, so an image with missing metadata is scored rather than dropped.
@@ -150,6 +150,9 @@ class PhysisDataset(Dataset):
         self.grid = self.size // self.patch
         self.augment = augment
         self.aug_cfg = data_cfg.augment
+        # Applied here so every consumer - training masks, the inference
+        # partition, the surprise map - inherits the same valid region.
+        self.erode_rings = int(data_cfg.get("masking", {}).get("erode_border_patches", 0) or 0)
         self.seed = seed
         assert not bool(self.aug_cfg.hflip), (
             "hflip is disabled by design: it changes laterality, and laterality is "
@@ -172,7 +175,7 @@ class PhysisDataset(Dataset):
             row["pad_x"], row["pad_y"], row["new_w"], row["new_h"],
             size=self.size, patch=self.patch,
         )
-        return image, valid
+        return image, erode_valid_mask(valid, self.erode_rings)
 
     def __getitem__(self, index: int) -> dict:
         row = self.df.iloc[index]
@@ -191,6 +194,8 @@ class PhysisDataset(Dataset):
             "stem": str(row["stem"]),
             "study_id": str(row["study_id"]),
             "index": index,
+            # Supervised runs carry a target; the JEPA path has none, hence -1.
+            "label": torch.tensor(float(row["label"]) if "label" in row else -1.0),
         }
 
     def _augment(self, image: np.ndarray, row, index: int) -> tuple[np.ndarray, np.ndarray]:
@@ -223,7 +228,7 @@ class PhysisDataset(Dataset):
         # Interpolation blurs the content edge; require a patch to be entirely
         # inside before calling it valid.
         blocks = content.reshape(self.grid, self.patch, self.grid, self.patch)
-        valid = blocks.min(axis=(1, 3)) >= 1.0 - 1e-3
+        valid = erode_valid_mask(blocks.min(axis=(1, 3)) >= 1.0 - 1e-3, self.erode_rings)
 
         amount = float(self.aug_cfg.brightness_contrast)
         if amount > 0:
