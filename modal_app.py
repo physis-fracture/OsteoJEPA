@@ -185,7 +185,7 @@ def benchmark(steps: int = 50) -> None:
 
 
 @app.function(gpu=GPU, volumes=VOLUMES, timeout=24 * HOUR, cpu=CPUS)
-def pretrain(name: str = "base", resume: str = "") -> None:
+def pretrain(name: str = "base", resume: str = "", config: str = "configs/base.yaml") -> None:
     """Stage A. 24 hours is Modal's ceiling for one call.
 
     A run needing longer does not need a bigger timeout; it needs to be called
@@ -198,10 +198,42 @@ def pretrain(name: str = "base", resume: str = "") -> None:
             f"Pass --resume /runs/{name}/checkpoints/last.pt to continue it, "
             f"choose another --run-name, or delete it: modal volume rm -r physis-runs /{name}",
         )
-    args = ["--config", f"{ROOT}/configs/base.yaml", "--set", *overrides(name)]
+    args = ["--config", f"{ROOT}/{config}", "--set", *overrides(name)]
     if resume:
         args += ["--resume", resume]
     run_script("pretrain.py", args)
+
+
+@app.function(gpu=GPU, volumes=VOLUMES, timeout=6 * HOUR, cpu=CPUS)
+def train_classifier(
+    name: str,
+    use_condition: bool = True,
+    holdout_bands: str = "",
+    split_mode: str = "grouped",
+    init_from: str = "",
+) -> None:
+    """The supervised model the product ranks by, and three of the experiments.
+
+    E2a is `use_condition`, E2b is `holdout_bands`, and the split-leakage number
+    is `split_mode`; each is the same run with one thing changed, which is what
+    makes the comparisons mean anything.
+    """
+    require_absent(
+        f"/runs/{name}",
+        f"Choose another --name, or delete it: modal volume rm -r physis-runs /{name}",
+    )
+    extra = [
+        f"classifier.use_condition={str(bool(use_condition)).lower()}",
+        f"classifier.split_mode={split_mode}",
+        f"classifier.init_from={init_from}",
+        "data.augment=true",
+    ]
+    if holdout_bands:
+        extra.append("classifier.holdout_bands=[" + holdout_bands + "]")
+    run_script(
+        "train_classifier.py",
+        ["--config", f"{ROOT}/configs/base.yaml", "--set", *overrides(name, *extra)],
+    )
 
 
 @app.function(gpu=GPU, volumes=VOLUMES, timeout=12 * HOUR, cpu=CPUS)
