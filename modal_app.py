@@ -55,6 +55,8 @@ image = (
         "pillow>=10.3",
         "scikit-learn>=1.5",
         "scipy>=1.13",
+        "torchmetrics>=1.4",
+        "faster-coco-eval>=1.6",
         "fastapi[standard]>=0.115",
         "matplotlib>=3.9",
     )
@@ -252,6 +254,20 @@ def score_classifier(name: str = "clf_main") -> None:
         ["--config", f"{ROOT}/configs/base.yaml",
          "--checkpoint", f"/runs/{name}/checkpoints/best.pt",
          "--run-subdir", "rescored", "--set", *overrides(name)],
+    )
+
+
+@app.function(gpu=GPU, volumes=VOLUMES, timeout=6 * HOUR, cpu=CPUS)
+def train_detector(name: str = "det_main", split_mode: str = "grouped") -> None:
+    """The comparator detector, and the mAP half of the split-leakage figure."""
+    require_absent(
+        f"/runs/{name}",
+        f"Choose another --name, or delete it: modal volume rm -r physis-runs /{name}",
+    )
+    run_script(
+        "train_detector.py",
+        ["--config", f"{ROOT}/configs/base.yaml", "--set",
+         *overrides(name, f"detector.split_mode={split_mode}", "data.augment=true")],
     )
 
 

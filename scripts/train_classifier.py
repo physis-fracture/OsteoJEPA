@@ -28,7 +28,12 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from physis.data.dataset import PhysisDataset, load_manifest, subset_by_study
+from physis.data.dataset import (
+    PhysisDataset,
+    assign_splits,
+    load_manifest,
+    subset_by_study,
+)
 from physis.data.geometry import age_band_index, band_list
 from physis.eval.metrics import evaluate
 from physis.models.classifier import build_classifier, load_backbone
@@ -42,30 +47,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--set", nargs="*", default=[])
     parser.add_argument("--run-subdir", default=None)
     return parser.parse_args()
-
-
-def assign_splits(manifest: pd.DataFrame, mode: str, seed: int) -> pd.DataFrame:
-    """Return a manifest whose `split` column follows the requested scheme.
-
-    `random_per_image` reproduces the practice the published baselines use: with
-    3.3 images per patient, it puts the same patient in train and test. The gap
-    between the two modes is the number the paper reports as split leakage.
-    """
-    if mode == "grouped":
-        return manifest
-    assert mode == "random_per_image", f"unknown split mode {mode!r}"
-
-    sizes = manifest["split"].value_counts(normalize=True)
-    rng = np.random.default_rng(seed)
-    draw = rng.permutation(len(manifest))
-    out = manifest.copy()
-    n_test = int(round(sizes.get("test", 0.2) * len(manifest)))
-    n_val = int(round(sizes.get("val", 0.2) * len(manifest)))
-    labels = np.array(["train"] * len(manifest), dtype=object)
-    labels[draw[:n_test]] = "test"
-    labels[draw[n_test : n_test + n_val]] = "val"
-    out["split"] = labels
-    return out
 
 
 def _optional_path(value) -> str:

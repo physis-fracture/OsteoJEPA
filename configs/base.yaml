@@ -145,6 +145,24 @@ classifier:
   weight_decay: 0.05
   warmup_epochs: 1
 
+detector:
+  # Comparator, not a contribution (paper Section 3.2.3). The triage score stays
+  # with the calibrated classifier; this only fills the radiologist's
+  # localization view and the mAP half of the split-leakage figure.
+  #
+  # torchvision rather than ultralytics: AGPL-3.0 conflicts with this project's
+  # MIT licence, and its 8-bit decode path would discard the 16-bit depth every
+  # other boundary here asserts on.
+  init: coco                       # the paper says Stage A; Stage A cost 0.21 AUROC
+  split_mode: grouped              # or random_per_image, for the mAP leakage figure
+  epochs: 12
+  batch_size: 8
+  lr: 0.01
+  weight_decay: 1.0e-4
+  score_threshold: 0.05            # low at eval; the serving threshold is separate
+  max_detections: 20
+  serve_threshold: 0.5             # what the radiologist view draws
+
 abort_criteria:
   # Pre-registered before any results were seen.
   max_mae_ahat_years: 3.0          # exceeded -> drop the sweep, use lambda = 0

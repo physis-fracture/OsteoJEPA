@@ -15,6 +15,9 @@ dependencies = [
     "pillow>=10.3",
     "scikit-learn>=1.5",
     "scipy>=1.13",
+    "torchmetrics>=1.4",
+    # mAP backend for torchmetrics; pure wheels, unlike pycocotools on Windows
+    "faster-coco-eval>=1.6",
     "fastapi[standard]>=0.115",
     "matplotlib>=3.9",
 ]
