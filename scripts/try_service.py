@@ -26,6 +26,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from physis.data.dataset import pick_demo_studies
 from physis.utils.config import load_config
 
 
@@ -43,39 +44,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--offline-scores", default="artifacts/clf/clf_main/rescored/scores_test.csv")
     return parser.parse_args()
-
-
-def pick_studies(manifest: pd.DataFrame, n: int, seed: int, confident: str | None) -> pd.DataFrame:
-    test = manifest[manifest["split"] == "test"]
-    by_study = test.groupby("study_id").agg(
-        boxes=("n_fracture_box", "max"),
-        cast=("tag_cast", "max"),
-        metal=("lbl_metal", "max"),
-        clean=("clean_strict", "min"),
-        age=("age", "first"),
-    )
-    positive = by_study[(by_study["boxes"] > 0) & (~by_study["cast"]) & (~by_study["metal"])]
-    negative = by_study[by_study["clean"]]
-
-    if confident is not None:
-        # Demo selection, not evaluation. Ranking by the model's own score picks
-        # cases it is sure about, which is what belongs in a recording; using
-        # these to judge accuracy would be circular.
-        offline = pd.read_csv(confident).groupby("study_id")["score"].max()
-        positive = positive.join(offline).sort_values("score", ascending=False)
-        negative = negative.join(offline).sort_values("score", ascending=True)
-        return pd.concat(
-            [positive.head(n).assign(truth=1), negative.head(n).assign(truth=0)]
-        ).reset_index()
-
-    # Otherwise a random draw. Taking the first studies by id is not a sample and
-    # can look far worse - or better - than the model is.
-    return pd.concat(
-        [
-            positive.sample(min(n, len(positive)), random_state=seed).assign(truth=1),
-            negative.sample(min(n, len(negative)), random_state=seed).assign(truth=0),
-        ]
-    ).reset_index()
 
 
 def build_payload(manifest, images_dir: Path, study_id: str, age: float, profile: str) -> dict:
@@ -109,19 +77,27 @@ def main() -> None:
     import urllib.error
     import urllib.request
 
+    # 10 seconds was enough for a local process and not for Modal: the container
+    # scales to zero, so the first request after an idle period waits through a
+    # cold start and the check failed on a service that was working.
     try:
-        with urllib.request.urlopen(args.url + "/v1/health", timeout=10) as response:
+        with urllib.request.urlopen(args.url + "/v1/health", timeout=120) as response:
             import json as _json
 
             health = _json.loads(response.read())
     except (urllib.error.URLError, TimeoutError) as err:
         raise SystemExit(
-            f"cannot reach {args.url}: {err}\nStart it with scripts/serve_local.py first."
+            f"cannot reach {args.url}: {err}\n"
+            "Local: start scripts/serve_local.py first.\n"
+            "Modal: check the deployment with  modal app list"
         )
     print(f"service: {health['status']} | model: {health['model']}\n")
 
-    chosen = pick_studies(
-        manifest, args.n, args.seed, args.offline_scores if args.confident else None
+    chosen = pick_demo_studies(
+        manifest,
+        args.n,
+        args.seed,
+        offline_scores=args.offline_scores if args.confident else None,
     )
     if args.confident:
         print("CONFIDENT SELECTION - for a demo. Not a measurement of accuracy.\n")

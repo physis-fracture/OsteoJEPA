@@ -98,6 +98,55 @@ def subset_by_study(df: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
     return df[df["study_id"].isin(taken)].reset_index(drop=True)
 
 
+def pick_demo_studies(
+    manifest: pd.DataFrame,
+    n: int,
+    seed: int,
+    *,
+    split: str = "test",
+    offline_scores: str | Path | None = None,
+) -> pd.DataFrame:
+    """Test-fold studies chosen so a demo shows the model, not its shortcut.
+
+    Positives carry a fracture box and **no cast and no metal**, because E4a
+    measured the model reading the cast: among fracture-negative images, 36 of
+    the 38 carrying a cast score above 0.5. Negatives come from `clean_strict`,
+    which excludes cast, metal, an AO classification, and every indirect sign of
+    injury. Draw a negative without that filter and a plaster follow-up will
+    score 1.0 with nothing broken in it, which looks like a broken model when
+    the fault is in the choice of example.
+
+    `offline_scores` switches from a random draw to the cases the model is most
+    sure about. That is demo selection, not evaluation: ranking by the model's
+    own score and then reporting how well it did would be circular.
+
+    Returns one row per study with `truth`, `age` and `n_images`.
+    """
+    rows = manifest[manifest["split"] == split]
+    by_study = rows.groupby("study_id").agg(
+        boxes=("n_fracture_box", "max"),
+        cast=("tag_cast", "max"),
+        metal=("lbl_metal", "max"),
+        clean=("clean_strict", "min"),
+        age=("age", "first"),
+        n_images=("stem", "count"),
+    )
+    positive = by_study[(by_study["boxes"] > 0) & (~by_study["cast"]) & (~by_study["metal"])]
+    negative = by_study[by_study["clean"]]
+
+    if offline_scores is not None:
+        score = pd.read_csv(offline_scores).groupby("study_id")["score"].max()
+        positive = positive.join(score).sort_values("score", ascending=False)
+        negative = negative.join(score).sort_values("score", ascending=True)
+        chosen = [positive.head(n).assign(truth=1), negative.head(n).assign(truth=0)]
+    else:
+        chosen = [
+            positive.sample(min(n, len(positive)), random_state=seed).assign(truth=1),
+            negative.sample(min(n, len(negative)), random_state=seed).assign(truth=0),
+        ]
+    return pd.concat(chosen).reset_index()
+
+
 def assign_splits(manifest: pd.DataFrame, mode: str, seed: int) -> pd.DataFrame:
     """Return a manifest whose `split` column follows the requested scheme.
 
