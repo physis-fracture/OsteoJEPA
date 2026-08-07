@@ -49,6 +49,13 @@ CPUS = 8.0
 # legitimate image_url is on this host, so the SSRF allowlist can be exact.
 R2_HOST = "2b3bf3b4058f753954a9b0d4cc31de54.r2.cloudflarestorage.com"
 
+# Cores for the serving container, and the thread count torch is told to use.
+# They have to agree. Left alone, torch reads the *host's* core count, which on
+# a Modal machine is far larger than the cgroup allows, and spawns that many
+# threads to contend over a fraction of a core each. Oversubscription like that
+# makes a CPU-bound forward pass slower than single-threaded.
+SERVE_CPUS = 4.0
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .uv_pip_install(
@@ -326,7 +333,11 @@ def score(split: str, name: str = "base") -> None:
 @app.function(
     volumes=VOLUMES,
     timeout=HOUR,
-    cpu=2.0,
+    # Four cores rather than two. A two-projection study measured 2.15 s on a
+    # laptop and 6.3 s here, and the classifier plus detector are CPU-bound, so
+    # the gap is cores. Modal bills per CPU-second, so twice the cores for half
+    # the time costs about the same and the demo stops waiting.
+    cpu=SERVE_CPUS,
     min_containers=0,
     # Bearer authentication. Create the secret once, then every deploy picks it
     # up regardless of which machine runs the deploy:
@@ -353,7 +364,10 @@ def score(split: str, name: str = "base") -> None:
     # flag for serving test images off a laptop and has no business here.
     env={"PHYSIS_IMAGE_HOSTS": os.environ.get("PHYSIS_IMAGE_HOSTS", R2_HOST)},
 )
-@modal.concurrent(max_inputs=8)
+# Concurrency at the core count, not above it. Inference here is CPU-bound, so
+# a ninth simultaneous request does not run faster by being admitted; it makes
+# the other eight slower and pushes them all towards the deadline.
+@modal.concurrent(max_inputs=int(SERVE_CPUS))
 @modal.asgi_app()
 def web():
     """The triage service. Scales to zero between requests.
@@ -362,6 +376,12 @@ def web():
     means a recalibration is a file write, not a rebuild.
     """
     import sys as _sys
+
+    import torch
+
+    # Match torch to the cgroup. See SERVE_CPUS: without this torch reads the
+    # host's core count and oversubscribes a fraction of a core per thread.
+    torch.set_num_threads(int(SERVE_CPUS))
 
     _sys.path.insert(0, f"{ROOT}/src")
     from physis.serve.api import build_app
