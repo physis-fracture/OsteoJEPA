@@ -54,6 +54,15 @@ def load_grayscale(data: bytes | str) -> tuple[np.ndarray, float]:
         # the server traceback still has it.
         raise UnreadableImage("not a decodable image") from error
 
+    # Read the full-scale value from the *source* dtype, before any channel
+    # collapse. Taking it afterwards reads the dtype of the mean, which numpy
+    # returns as float64, and the float branch below assumes floats already sit
+    # in [0, 1]. An 8-bit RGB upload would then be divided by 1.0 instead of 255
+    # and arrive 255 times too bright. Harmless on the ordinary path, where the
+    # percentile rescale normalizes anyway, and wrong on an already-preprocessed
+    # canvas, which divides by this and nothing else.
+    full_scale = DTYPE_MAX.get(str(array.dtype), 1.0 if array.dtype.kind == "f" else 255.0)
+
     if array.ndim == 3:
         # RGB or RGBA upload: collapse to luminance rather than refusing, since a
         # PACS export re-saved as PNG is a normal thing for a client to send.
@@ -62,7 +71,6 @@ def load_grayscale(data: bytes | str) -> tuple[np.ndarray, float]:
         raise UnreadableImage(f"expected a 2D image, got shape {array.shape}")
     if array.size == 0:
         raise UnreadableImage("image is empty")
-    full_scale = DTYPE_MAX.get(str(array.dtype), 1.0 if array.dtype.kind == "f" else 255.0)
     return array.astype(np.float32), float(full_scale)
 
 

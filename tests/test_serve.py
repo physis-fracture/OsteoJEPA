@@ -304,6 +304,18 @@ def test_an_invalid_enum_is_refused(client, images):
     assert client.post("/v1/predict", json=body).status_code == 422
 
 
+def test_a_repeated_image_id_is_refused(client, images):
+    """Boxes are correlated back on image_id, so a duplicate would answer both
+    images with one image's boxes and draw the PA's fracture on the lateral."""
+    body = payload(images, images=[
+        {"image_id": "same", "image_url": f"{images}/img0.png"},
+        {"image_id": "same", "image_url": f"{images}/img1.png"},
+    ])
+    response = client.post("/v1/predict", json=body)
+    assert response.status_code == 422
+    assert "unique" in response.json()["errors"][0]["message"]
+
+
 def test_more_images_than_the_ceiling_are_refused(client, images):
     body = payload(images, images=[
         {"image_id": f"i{n}", "image_url": f"{images}/img0.png"} for n in range(9)

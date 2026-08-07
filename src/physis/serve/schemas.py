@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 # The web application's enums. The model works in integers; that mapping is an
 # implementation detail and stays inside the service.
@@ -71,6 +71,28 @@ class PredictRequest(BaseModel):
         list[PredictImage],
         Field(min_length=1, max_length=MAX_IMAGES),
     ]
+
+    @model_validator(mode="after")
+    def image_ids_must_be_unique(self):
+        """`image_id` is the key results are correlated back on.
+
+        Boxes are returned per image and matched by this id, so a study sending
+        the same id twice would have both images answered with one image's
+        boxes. That is a wrong answer rather than an error: the client would
+        draw the posteroanterior's fracture onto the lateral projection and
+        nothing downstream would look unusual. Refusing is the only way it
+        surfaces.
+        """
+        seen, repeated = set(), []
+        for image in self.images:
+            if image.image_id in seen and image.image_id not in repeated:
+                repeated.append(image.image_id)
+            seen.add(image.image_id)
+        if repeated:
+            raise ValueError(
+                "image_id must be unique within a study; repeated: " + ", ".join(repeated)
+            )
+        return self
 
 
 class PredictImageResult(BaseModel):
