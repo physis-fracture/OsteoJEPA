@@ -343,7 +343,11 @@ def web():
             if not (checkpoint.exists() and calibration.exists()):
                 return None
             cfg = load_config(f"{ROOT}/configs/base.yaml", PATH_OVERRIDES)
-            holder["scorer"] = Scorer(cfg, str(checkpoint), str(calibration))
+            detector = pathlib.Path("/runs/det_main/checkpoints/best.pt")
+            holder["scorer"] = Scorer(
+                cfg, str(checkpoint), str(calibration),
+                detector_checkpoint=str(detector) if detector.exists() else None,
+            )
         return holder["scorer"]
 
     return build_app(factory)

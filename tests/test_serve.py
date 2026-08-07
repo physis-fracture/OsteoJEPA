@@ -194,10 +194,63 @@ def test_triage_profile_carries_no_location_information(client):
     assert all(not forbidden & set(image) for image in body["images"])
 
 
-def test_radiologist_profile_says_localization_is_unavailable(client):
+def test_radiologist_profile_says_so_when_no_detector_is_loaded(client):
+    """Null, not absent: a client must tell "no boxes found" from "cannot look"."""
     body = client.post("/v1/score/study", json=study_payload(profile="radiologist")).json()
     assert body["localization"] is None
-    assert "null result" in body["localization_note"]
+    assert "no detector" in body["localization_note"]
+
+
+@pytest.fixture(scope="module")
+def scorer_with_detector(tmp_path_factory, scorer):
+    """The same scorer with an untrained detector attached.
+
+    What is under test is the separation, not the boxes: with a detector loaded
+    the triage profile must still carry no location information, and that is the
+    configuration where a leak would actually matter.
+    """
+    from physis.models.detector import build_detector
+
+    cfg = load_config("configs/base.yaml", ["detector.init=random"])
+    tmp = tmp_path_factory.mktemp("detector")
+    path = tmp / "det.pt"
+    torch.save({"model": build_detector(cfg).state_dict()}, path)
+    return Scorer(
+        scorer.cfg,
+        str(scorer_checkpoint(scorer)),
+        str(scorer_calibration(scorer)),
+        detector_checkpoint=str(path),
+    )
+
+
+def scorer_checkpoint(scorer):
+    return scorer._checkpoint_path
+
+
+def scorer_calibration(scorer):
+    return scorer._calibration_path
+
+
+def test_triage_carries_no_location_even_with_a_detector_loaded(scorer_with_detector):
+    client = TestClient(build_app(lambda: scorer_with_detector))
+    body = client.post("/v1/score/study", json=study_payload(profile="triage")).json()
+    forbidden = {"surprise_map", "implicit_age_map", "boxes", "localization"}
+    assert not forbidden & set(body)
+    assert all(not forbidden & set(image) for image in body["images"])
+    assert body["model"]["contract"] == "v1.1"
+
+
+def test_radiologist_profile_returns_boxes_when_a_detector_is_loaded(scorer_with_detector):
+    client = TestClient(build_app(lambda: scorer_with_detector))
+    body = client.post("/v1/score/study", json=study_payload(profile="radiologist")).json()
+    assert isinstance(body["localization"], list)
+    entry = body["localization"][0]
+    assert entry["image_id"] == "img0"
+    assert isinstance(entry["boxes"], list)
+    for box in entry["boxes"]:
+        assert len(box) == 5
+        assert box[0] < box[2] and box[1] < box[3]
+        assert 0.0 <= box[4] <= 1.0
 
 
 # --- preprocessing --------------------------------------------------------

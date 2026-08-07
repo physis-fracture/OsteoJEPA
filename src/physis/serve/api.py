@@ -6,10 +6,15 @@ discipline. The device claim is computer-aided triage and notification
 on the original image, so a client that only ever asks for `triage` cannot leak
 location information into the worklist by accident.
 
-The `radiologist` profile currently adds nothing. OsteoJEPA's surprise map
-returned a null result and a map that does not localize is worse than no map;
-the profile stays in the contract so box localization can fill it later without
-a version bump for clients that already request it.
+The `radiologist` profile carries fracture boxes when a detector is loaded, and
+`localization: null` when one is not. OsteoJEPA's surprise map returned a null
+result and never filled that field; a map that does not localize is worse than
+no map.
+
+Only this profile runs the detector. It costs about a second per image against
+the classifier's 79 ms, and the worklist is not permitted to show location
+anyway, so putting it on the ranking path would buy nothing and cost twelve
+times the latency.
 """
 
 from __future__ import annotations
@@ -155,19 +160,20 @@ def build_app(scorer_factory) -> FastAPI:
                 study_id=payload.study_id,
                 age_years=payload.age_years,
                 sex=payload.sex,
+                localize=payload.profile == "radiologist",
             )
         except UnreadableImage as err:
             return error(415, "unreadable_image", detail=str(err))
         if (time.perf_counter() - started) * 1000.0 > budget_ms:
             return error(504, "timeout", budget_ms=budget_ms)
 
-        if payload.profile == "radiologist":
-            # Present and empty on purpose: the field exists in the contract and
-            # currently has nothing truthful to put in it.
+        if payload.profile == "radiologist" and result.get("localization") is None:
+            # No detector loaded. Present and empty on purpose rather than
+            # absent, so a client can tell "no boxes found" from "this
+            # deployment cannot localize".
             result["localization"] = None
             result["localization_note"] = (
-                "not available: the surprise map returned a null result and is "
-                "not shown; see docs/EXPERIMENT_REVISION.md"
+                "no detector loaded in this deployment"
             )
         return result
 
