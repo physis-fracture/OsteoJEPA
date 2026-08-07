@@ -26,9 +26,11 @@ import time
 from typing import Any, Literal
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from . import compat
 from .preprocess import UnreadableImage
 from .scorer import AgeRequired, Scorer
 
@@ -82,7 +84,25 @@ def resolve_image(image: ImageIn) -> bytes:
 
 def build_app(scorer_factory) -> FastAPI:
     """`scorer_factory` is a callable returning a Scorer, or None when unloaded."""
-    app = FastAPI(title="Physis triage", version="1.0")
+    app = FastAPI(title="Physis triage", version="1.1")
+
+    # The web client is a browser on a different origin, so without this every
+    # request is refused by the browser before it reaches the service - and the
+    # failure looks like the API being down rather than a policy decision.
+    # PHYSIS_CORS_ORIGINS is a comma-separated allowlist; "*" is the demo default
+    # and should be narrowed to the app's origin for anything longer-lived.
+    origins = [
+        origin.strip()
+        for origin in os.environ.get("PHYSIS_CORS_ORIGINS", "*").split(",")
+        if origin.strip()
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
 
     @app.get("/")
     def root():
@@ -98,6 +118,7 @@ def build_app(scorer_factory) -> FastAPI:
                 "GET  /v1/health",
                 "POST /v1/score/study",
                 "POST /v1/score/image",
+                "POST /v1/predict   (compatibility shape for the web client)",
             ],
             "note": (
                 "Triage and notification only. This service does not diagnose, "
@@ -188,4 +209,5 @@ def build_app(scorer_factory) -> FastAPI:
         response.pop("triage_score", None)
         return response
 
+    compat.register(app, scorer_factory)
     return app

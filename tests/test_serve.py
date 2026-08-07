@@ -359,3 +359,126 @@ def test_percentile_never_leaves_the_unit_interval():
     assert percentile_for(1e6, entry) == 1.0
     assert percentile_for(-1e6, entry) == 0.0
     assert 0.0 <= percentile_for(0.0, entry) <= 1.0
+
+
+def test_cross_origin_requests_are_allowed(client):
+    """A browser on another origin is the only client that matters here."""
+    response = client.options(
+        "/v1/score/study",
+        headers={
+            "Origin": "https://physis.example",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert response.status_code in (200, 204)
+    assert "access-control-allow-origin" in {k.lower() for k in response.headers}
+
+
+# --- /v1/predict, the shape the web client was built against ----------------
+
+
+def serve_one_image(tmp_path, name="img0.png"):
+    """A tiny http server standing in for a presigned R2 URL."""
+    import functools
+    import http.server
+    import threading
+
+    array = np.zeros((384, 384), dtype=np.uint16)
+    array[:, 64:320] = 40000
+    Image.fromarray(array).save(tmp_path / name)
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(tmp_path))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}/{name}"
+
+
+def predict_payload(url, **overrides):
+    payload = {
+        "study_id": "0001_01",
+        "age_years": 11.5,
+        "sex": "male",
+        "images": [
+            {"image_id": "img0", "image_url": url, "view": "LATERAL", "laterality": "left"}
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_predict_returns_the_envelope_the_client_expects(client, tmp_path):
+    server, url = serve_one_image(tmp_path)
+    try:
+        body = client.post("/v1/predict", json=predict_payload(url)).json()
+    finally:
+        server.shutdown()
+    assert body["success"] is True
+    data = body["data"]
+    assert {"study_id", "triage_score", "priority_percentile", "age_band",
+            "images", "inference_time_ms", "model_version"} <= set(data)
+
+
+def test_predict_percentile_is_on_a_hundred(client, tmp_path):
+    """The web UI prints it with a percent sign and filters at 80 and 95."""
+    server, url = serve_one_image(tmp_path)
+    try:
+        data = client.post("/v1/predict", json=predict_payload(url)).json()["data"]
+    finally:
+        server.shutdown()
+    assert 0.0 <= data["priority_percentile"] <= 100.0
+    native = client.post("/v1/score/study", json=study_payload()).json()
+    assert 0.0 <= native["priority_percentile"] <= 1.0
+
+
+def test_predict_returns_null_for_the_quantities_that_no_longer_exist(client, tmp_path):
+    """Null, not omitted: absent reads as an oversight rather than an answer."""
+    server, url = serve_one_image(tmp_path)
+    try:
+        data = client.post("/v1/predict", json=predict_payload(url)).json()["data"]
+    finally:
+        server.shutdown()
+    image = data["images"][0]
+    for field in ("implicit_age", "implicit_age_gap", "surprise_map", "implicit_age_map"):
+        assert field in image and image[field] is None
+    assert "boxes" in image
+
+
+@pytest.mark.parametrize(
+    "overrides,code",
+    [
+        ({"age_years": None}, "VALIDATION_ERROR"),
+        ({"study_id": None}, "VALIDATION_ERROR"),
+        ({"images": []}, "VALIDATION_ERROR"),
+    ],
+)
+def test_predict_errors_carry_the_envelope(client, tmp_path, overrides, code):
+    """`finalizeStudy` branches on `success`, not on the status code."""
+    server, url = serve_one_image(tmp_path)
+    try:
+        body = client.post("/v1/predict", json=predict_payload(url, **overrides)).json()
+    finally:
+        server.shutdown()
+    assert body["success"] is False
+    assert body["error_code"] == code
+    assert body["message"]
+
+
+def test_predict_unreachable_image_is_reported_not_raised(client, tmp_path):
+    server, url = serve_one_image(tmp_path)
+    try:
+        missing = url.replace("img0.png", "absent.png")
+        body = client.post("/v1/predict", json=predict_payload(missing)).json()
+    finally:
+        server.shutdown()
+    assert body["success"] is False
+    assert body["error_code"] == "IMAGE_NOT_FOUND"
+
+
+def test_predict_says_so_when_no_model_is_loaded(tmp_path):
+    unloaded = TestClient(build_app(lambda: None))
+    server, url = serve_one_image(tmp_path)
+    try:
+        body = unloaded.post("/v1/predict", json=predict_payload(url)).json()
+    finally:
+        server.shutdown()
+    assert body["success"] is False
+    assert body["error_code"] == "SERVICE_UNAVAILABLE"
