@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/base.yaml")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--calibration", required=True)
+    parser.add_argument("--detector", default=None, help="box detector checkpoint")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--device", default="cpu")
@@ -42,7 +43,8 @@ def main() -> None:
 
     # Loaded once at startup rather than on the first request: a demo should not
     # pay a model load in front of an audience.
-    scorer = Scorer(cfg, args.checkpoint, args.calibration, device=args.device)
+    scorer = Scorer(cfg, args.checkpoint, args.calibration, device=args.device,
+                    detector_checkpoint=args.detector)
     print(f"loaded {args.checkpoint} on {args.device}")
     print(f"model: {scorer.model_info()}")
 
