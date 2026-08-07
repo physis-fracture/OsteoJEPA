@@ -45,6 +45,10 @@ ROOT = "/root"
 GPU = "A100-40GB"
 CPUS = 8.0
 
+# The R2 S3 endpoint the web application signs its uploads through. Every
+# legitimate image_url is on this host, so the SSRF allowlist can be exact.
+R2_HOST = "2b3bf3b4058f753954a9b0d4cc31de54.r2.cloudflarestorage.com"
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .uv_pip_install(
@@ -336,15 +340,18 @@ def score(split: str, name: str = "base") -> None:
     # deploy instead, and `required_keys` fails it again if the secret exists
     # but is missing the key.
     secrets=[modal.Secret.from_name("physis-api-key", required_keys=["PHYSIS_API_KEY"])],
-    # Which hosts /v1/predict may fetch an image from. Empty permits any public
-    # host, which still blocks loopback, private ranges and the link-local
-    # metadata endpoint; narrowing it to the R2 hostname closes the rest. Set it
-    # here rather than in a secret because it is configuration, not a
-    # credential, and a reader of this file should be able to see it.
+    # Which hosts /v1/predict may fetch an image from. The web application signs
+    # its uploads through R2's S3 endpoint, so every legitimate image_url is on
+    # exactly one host and the allowlist can be exact.
+    #
+    # Not a credential: the account id is in every presigned URL the browser
+    # already receives, so it is configuration and belongs where a reader of
+    # this file can see it. Override with PHYSIS_IMAGE_HOSTS, comma separated,
+    # if the app moves to a public r2.dev address or a custom domain.
     #
     # PHYSIS_ALLOW_LOOPBACK_FETCH is deliberately absent. It is a development
     # flag for serving test images off a laptop and has no business here.
-    env={"PHYSIS_IMAGE_HOSTS": os.environ.get("PHYSIS_IMAGE_HOSTS", "")},
+    env={"PHYSIS_IMAGE_HOSTS": os.environ.get("PHYSIS_IMAGE_HOSTS", R2_HOST)},
 )
 @modal.concurrent(max_inputs=8)
 @modal.asgi_app()

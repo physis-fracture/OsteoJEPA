@@ -374,6 +374,27 @@ def test_dangerous_urls_are_refused(url, monkeypatch):
         fetch.check_url(url)
 
 
+def test_the_production_allowlist_admits_r2_and_nothing_beside_it(monkeypatch):
+    """The host the web application actually signs its uploads through.
+
+    An allowlist that quietly stopped matching would fail open only in the sense
+    that every real upload would start returning 422, so this pins the shape of
+    a presigned R2 URL against the entry that admits it.
+    """
+    monkeypatch.delenv("PHYSIS_ALLOW_LOOPBACK_FETCH", raising=False)
+    host = "2b3bf3b4058f753954a9b0d4cc31de54.r2.cloudflarestorage.com"
+    fetch.check_url(
+        f"https://{host}/physis-uploads/study.png?X-Amz-Signature=abc", allowlist=(host,)
+    )
+    for refused in (
+        f"http://{host}/x.png",                      # plain http
+        "https://other.r2.cloudflarestorage.com/x.png",  # a different account
+        f"https://{host}.evil.net/x.png",            # suffix confusion
+    ):
+        with pytest.raises(fetch.ImageFetchError):
+            fetch.check_url(refused, allowlist=(host,))
+
+
 def test_the_allowlist_matches_hosts_and_subdomains_only(monkeypatch):
     monkeypatch.delenv("PHYSIS_ALLOW_LOOPBACK_FETCH", raising=False)
     allow = ("r2.dev",)
