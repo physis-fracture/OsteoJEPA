@@ -227,6 +227,7 @@ data/manifest.csv
 data/README.md
 data/summary.json
 runs
+demo_set.zip
 
 # Agents
 .agents/*
@@ -242,3 +243,4 @@ docs/RESULTS.md
 docs/WEB_INTEGRATION.md
 # Exported demo studies (regenerate with scripts/export_demo_set.py)
 demo_set/
+
