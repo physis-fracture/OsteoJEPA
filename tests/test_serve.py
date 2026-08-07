@@ -1,13 +1,19 @@
 """The API surface and its failure modes.
 
-M6 is accepted on handling the failure path - a missing age, an unreadable file,
-a model timeout - so those are tested rather than assumed. The model here is
-untrained; what is under test is the contract, not the score.
+M6 is accepted on handling the failure path, so those are tested rather than
+assumed. The model here is untrained; what is under test is the contract, not
+the score.
+
+Three routes exist and no more. `/v1/score/study` and `/v1/score/image` were
+removed along with the request shape built around object keys, integer view
+codes and a `profile` switch, so the tests that covered them are gone with them.
 """
 
-import base64
+import functools
+import http.server
 import io
 import json
+import threading
 
 import numpy as np
 import pytest
@@ -17,6 +23,7 @@ from omegaconf import OmegaConf
 from PIL import Image
 
 from physis.models.classifier import build_classifier
+from physis.serve import fetch
 from physis.serve.api import build_app
 from physis.serve.preprocess import (
     UnreadableImage,
@@ -28,15 +35,23 @@ from physis.serve.scorer import AgeRequired, Scorer
 from physis.utils.config import load_config
 
 
-def png_bytes(height=500, width=380, mode="I;16"):
+def png_bytes(height=500, width=380):
     array = (np.random.rand(height, width) * 60000).astype(np.uint16)
     buffer = io.BytesIO()
     Image.fromarray(array).save(buffer, format="PNG")
     return buffer.getvalue()
 
 
-def b64(data: bytes) -> str:
-    return base64.b64encode(data).decode()
+@pytest.fixture(autouse=True)
+def allow_loopback(monkeypatch):
+    """The image server below is plain http on 127.0.0.1.
+
+    Production refuses both. The escape hatch is loopback-only and is what
+    serve_local.py sets, so exercising it here also covers the flag.
+    """
+    monkeypatch.setenv("PHYSIS_ALLOW_LOOPBACK_FETCH", "1")
+    monkeypatch.delenv("PHYSIS_API_KEY", raising=False)
+    monkeypatch.delenv("PHYSIS_IMAGE_HOSTS", raising=False)
 
 
 @pytest.fixture(scope="module")
@@ -68,200 +83,381 @@ def scorer(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def client(scorer):
-    return TestClient(build_app(lambda: scorer))
+    return TestClient(build_app(lambda: scorer), raise_server_exceptions=False)
 
 
-def study_payload(**overrides):
-    payload = {
+@pytest.fixture(scope="module")
+def images(tmp_path_factory):
+    """A throwaway http server standing in for presigned R2 URLs."""
+    directory = tmp_path_factory.mktemp("images")
+    for name in ("img0.png", "img1.png"):
+        (directory / name).write_bytes(png_bytes())
+    (directory / "notanimage.png").write_bytes(b"nope")
+
+    rgb = (np.random.rand(400, 300, 3) * 255).astype(np.uint8)
+    buffer = io.BytesIO()
+    Image.fromarray(rgb).save(buffer, format="PNG")
+    (directory / "rgb.png").write_bytes(buffer.getvalue())
+
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
+    handler.log_message = lambda *a, **k: None
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+def payload(images_url, **overrides):
+    body = {
         "study_id": "0001_01",
         "age_years": 11.5,
-        "sex": "M",
-        "images": [{"image_id": "img0", "content": b64(png_bytes()), "view": 1,
-                    "laterality": "L"}],
+        "sex": "male",
+        "images": [
+            {"image_id": "img0", "image_url": f"{images_url}/img0.png",
+             "view": "PA", "laterality": "left"}
+        ],
     }
-    payload.update(overrides)
-    return payload
+    body.update(overrides)
+    return body
 
 
-# --- the happy path -------------------------------------------------------
+# --- the API surface ------------------------------------------------------
 
-def test_scores_a_study(client):
-    response = client.post("/v1/score/study", json=study_payload())
-    assert response.status_code == 200
-    body = response.json()
-    assert body["study_id"] == "0001_01"
-    assert 0.0 <= body["triage_score"] <= 1.0
-    assert 0.0 <= body["priority_percentile"] <= 1.0
-    assert body["age_band"] == "11"
-    assert body["model"]["contract"] == "v1"
-    assert body["inference_time_ms"] > 0
-
-
-def test_study_score_is_the_max_over_its_images(client, scorer):
-    payload = study_payload()
-    payload["images"] = [
-        {"image_id": "a", "content": b64(png_bytes())},
-        {"image_id": "b", "content": b64(png_bytes())},
-    ]
-    body = client.post("/v1/score/study", json=payload).json()
-    assert len(body["images"]) == 2
-    assert body["triage_score"] == max(i["triage_score"] for i in body["images"])
-
-
-def test_root_lists_the_endpoints(client):
+def test_root_reports_the_service(client):
     body = client.get("/").json()
-    assert body["status"] == "ok"
-    assert body["contract"] == "v1"
-    assert any("score/study" in e for e in body["endpoints"])
+    assert body["service"] == "Physis triage inference"
+    assert body["health"] == "/v1/health"
 
 
-def test_health_reports_provenance(client):
+def test_health_is_public_and_thin(client):
     body = client.get("/v1/health").json()
-    assert body["status"] == "ok"
-    # Every displayed number must be traceable to a checkpoint and a calibration.
-    assert {"checkpoint", "calibration", "contract"} <= set(body["model"])
+    assert body == {"status": "ok", "contract_version": "1.1"}
+    # Provenance belongs on the authenticated response. An unauthenticated
+    # endpoint has no reason to name the checkpoint that is loaded.
+    assert "model" not in body
 
 
 def test_health_is_503_without_a_model():
     unloaded = TestClient(build_app(lambda: None))
-    assert unloaded.get("/v1/health").status_code == 503
-    response = unloaded.post("/v1/score/study", json=study_payload())
+    response = unloaded.get("/v1/health")
     assert response.status_code == 503
-    assert response.json()["error"] == "model_unavailable"
+    assert response.json()["status"] == "model_unavailable"
 
 
-# --- the failure path M6 is accepted on -----------------------------------
-
-@pytest.mark.parametrize("age", [None, 0.0, 25.0])
-def test_missing_or_impossible_age_is_422(client, age):
-    response = client.post("/v1/score/study", json=study_payload(age_years=age))
-    assert response.status_code == 422
-    assert response.json()["error"] == "age_required"
+def test_the_removed_endpoints_are_gone(client, images):
+    for path in ("/v1/score/study", "/v1/score/image"):
+        assert client.post(path, json=payload(images)).status_code == 404
 
 
-def test_missing_study_id_is_422(client):
-    response = client.post("/v1/score/study", json=study_payload(study_id=None))
-    assert response.status_code == 422
-    assert response.json()["error"] == "study_id_required"
+# --- the happy path -------------------------------------------------------
+
+def test_scores_a_study(client, images):
+    response = client.post("/v1/predict", json=payload(images))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert data["study_id"] == "0001_01"
+    assert 0.0 <= data["triage_score"] <= 1.0
+    # 0-100 here, not 0-1: the client formats it with a percent sign.
+    assert 0.0 <= data["priority_percentile"] <= 100.0
+    assert data["age_band"] == "11"
+    assert isinstance(data["inference_time_ms"], int)
+    assert data["model_version"].endswith("@v1")
 
 
-def test_both_sources_is_422(client):
-    payload = study_payload()
-    payload["images"][0]["r2_key"] = "uploads/x.png"
-    response = client.post("/v1/score/study", json=payload)
-    assert response.status_code == 422
-    assert response.json()["error"] == "image_source_ambiguous"
+def test_study_score_is_the_max_over_its_images(client, images):
+    body = client.post("/v1/predict", json=payload(
+        images,
+        images=[
+            {"image_id": "a", "image_url": f"{images}/img0.png"},
+            {"image_id": "b", "image_url": f"{images}/img1.png"},
+        ],
+    )).json()
+    data = body["data"]
+    assert len(data["images"]) == 2
+    assert data["triage_score"] == max(i["triage_score"] for i in data["images"])
 
 
-def test_neither_source_is_422(client):
-    payload = study_payload()
-    payload["images"][0].pop("content")
-    response = client.post("/v1/score/study", json=payload)
-    assert response.status_code == 422
-    assert response.json()["error"] == "image_source_ambiguous"
+def test_request_id_is_echoed(client, images):
+    response = client.post(
+        "/v1/predict", json=payload(images), headers={"X-Request-ID": "abc123"}
+    )
+    assert response.headers["X-Request-ID"] == "abc123"
+    # Generated when the client does not supply one, so a call is always
+    # traceable from the client's log into Modal's.
+    assert client.post("/v1/predict", json=payload(images)).headers["X-Request-ID"]
 
 
-def test_unreadable_upload_is_415(client):
-    payload = study_payload()
-    payload["images"][0]["content"] = b64(b"this is not an image")
-    response = client.post("/v1/score/study", json=payload)
-    assert response.status_code == 415
-    assert response.json()["error"] == "unreadable_image"
+def test_deprecated_osteojepa_fields_are_null_not_absent(client, images):
+    image = client.post("/v1/predict", json=payload(images)).json()["data"]["images"][0]
+    for field in ("implicit_age", "implicit_age_gap", "surprise_map", "implicit_age_map"):
+        assert field in image and image[field] is None
 
 
-def test_unconfigured_object_store_is_404(client):
-    payload = study_payload()
-    payload["images"][0] = {"image_id": "img0", "r2_key": "uploads/missing.png"}
-    response = client.post("/v1/score/study", json=payload)
-    assert response.status_code == 404
-    assert response.json()["error"] == "object_not_found"
+def test_boxes_are_null_when_no_detector_is_loaded(client, images):
+    """Null and empty differ: [] is "looked and found nothing", null is
+    "this deployment cannot localize"."""
+    image = client.post("/v1/predict", json=payload(images)).json()["data"]["images"][0]
+    assert image["boxes"] is None
 
 
-def test_exceeding_the_deadline_is_504(client, monkeypatch):
-    """M6 is accepted on handling a model timeout, so the service owns a deadline."""
-    monkeypatch.setenv("PHYSIS_DEADLINE_MS", "0")
-    response = client.post("/v1/score/study", json=study_payload())
-    assert response.status_code == 504
-    assert response.json()["error"] == "timeout"
-
-
-# --- the regulatory separation --------------------------------------------
-
-def test_triage_profile_carries_no_location_information(client):
-    body = client.post("/v1/score/study", json=study_payload(profile="triage")).json()
-    forbidden = {"surprise_map", "implicit_age_map", "boxes", "localization"}
-    assert not forbidden & set(body)
-    assert all(not forbidden & set(image) for image in body["images"])
-
-
-def test_radiologist_profile_says_so_when_no_detector_is_loaded(client):
-    """Null, not absent: a client must tell "no boxes found" from "cannot look"."""
-    body = client.post("/v1/score/study", json=study_payload(profile="radiologist")).json()
-    assert body["localization"] is None
-    assert "no detector" in body["localization_note"]
-
+# --- localization ---------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def scorer_with_detector(tmp_path_factory, scorer):
-    """The same scorer with an untrained detector attached.
-
-    What is under test is the separation, not the boxes: with a detector loaded
-    the triage profile must still carry no location information, and that is the
-    configuration where a leak would actually matter.
-    """
+def client_with_detector(tmp_path_factory, scorer):
     from physis.models.detector import build_detector
 
     cfg = load_config("configs/base.yaml", ["detector.init=random"])
     tmp = tmp_path_factory.mktemp("detector")
     path = tmp / "det.pt"
     torch.save({"model": build_detector(cfg).state_dict()}, path)
-    return Scorer(
+    with_detector = Scorer(
         scorer.cfg,
-        str(scorer_checkpoint(scorer)),
-        str(scorer_calibration(scorer)),
+        str(scorer._checkpoint_path),
+        str(scorer._calibration_path),
         detector_checkpoint=str(path),
     )
+    return TestClient(build_app(lambda: with_detector))
 
 
-def scorer_checkpoint(scorer):
-    return scorer._checkpoint_path
+def test_boxes_are_a_list_when_a_detector_is_loaded(client_with_detector, images):
+    data = client_with_detector.post("/v1/predict", json=payload(images)).json()["data"]
+    assert data["model_version"].endswith("@v1.1")
+    for image in data["images"]:
+        assert isinstance(image["boxes"], list)
+        for box in image["boxes"]:
+            assert len(box) == 5
+            assert box[0] <= box[2] and box[1] <= box[3]
+            assert 0.0 <= box[4] <= 1.0
 
 
-def scorer_calibration(scorer):
-    return scorer._calibration_path
+# --- authentication -------------------------------------------------------
+
+@pytest.fixture
+def guarded(scorer, monkeypatch):
+    monkeypatch.setenv("PHYSIS_API_KEY", "s3cret")
+    return TestClient(build_app(lambda: scorer))
 
 
-def test_triage_carries_no_location_even_with_a_detector_loaded(scorer_with_detector):
-    client = TestClient(build_app(lambda: scorer_with_detector))
-    body = client.post("/v1/score/study", json=study_payload(profile="triage")).json()
-    forbidden = {"surprise_map", "implicit_age_map", "boxes", "localization"}
-    assert not forbidden & set(body)
-    assert all(not forbidden & set(image) for image in body["images"])
-    assert body["model"]["contract"] == "v1.1"
+def test_open_when_no_key_is_configured(client, images):
+    assert client.post("/v1/predict", json=payload(images)).status_code == 200
 
 
-def test_radiologist_profile_returns_boxes_when_a_detector_is_loaded(scorer_with_detector):
-    client = TestClient(build_app(lambda: scorer_with_detector))
-    body = client.post("/v1/score/study", json=study_payload(profile="radiologist")).json()
-    assert isinstance(body["localization"], list)
-    entry = body["localization"][0]
-    assert entry["image_id"] == "img0"
-    assert isinstance(entry["boxes"], list)
-    for box in entry["boxes"]:
-        assert len(box) == 5
-        assert box[0] < box[2] and box[1] < box[3]
-        assert 0.0 <= box[4] <= 1.0
+def test_predict_needs_the_key(guarded, images):
+    response = guarded.post("/v1/predict", json=payload(images))
+    assert response.status_code == 401
+    body = response.json()
+    assert body["success"] is False
+    assert body["error_code"] == "UNAUTHORIZED"
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+
+    ok = guarded.post(
+        "/v1/predict", json=payload(images), headers={"Authorization": "Bearer s3cret"}
+    )
+    assert ok.status_code == 200
+
+
+def test_a_wrong_or_malformed_key_is_refused(guarded, images):
+    for header in ("Bearer wrong", "s3cret", "Basic s3cret", "Bearer "):
+        response = guarded.post(
+            "/v1/predict", json=payload(images), headers={"Authorization": header}
+        )
+        assert response.status_code == 401, header
+
+
+def test_health_stays_open_when_a_key_is_set(guarded):
+    assert guarded.get("/v1/health").status_code == 200
+    assert guarded.get("/").status_code == 200
+
+
+# --- validation -----------------------------------------------------------
+
+@pytest.mark.parametrize("override,field", [
+    ({"study_id": ""}, "study_id"),
+    ({"age_years": 0.1}, "age_years"),
+    ({"age_years": 25.0}, "age_years"),
+    ({"images": []}, "images"),
+    ({"sex": "other"}, "sex"),
+])
+def test_invalid_requests_are_422_in_the_envelope(client, images, override, field):
+    response = client.post("/v1/predict", json=payload(images, **override))
+    assert response.status_code == 422
+    body = response.json()
+    assert body["success"] is False
+    assert body["error_code"] == "VALIDATION_ERROR"
+    # FastAPI's own {"detail": [...]} would read as a success with every field
+    # missing, because the client branches on `success`.
+    assert any(item["field"] == field for item in body["errors"]), body["errors"]
+
+
+@pytest.mark.parametrize("missing", ["study_id", "age_years", "images"])
+def test_required_fields_have_no_default(client, images, missing):
+    body = payload(images)
+    del body[missing]
+    assert client.post("/v1/predict", json=body).status_code == 422
+
+
+def test_an_invalid_enum_is_refused(client, images):
+    body = payload(images)
+    body["images"][0]["view"] = "OBLIQUE"
+    assert client.post("/v1/predict", json=body).status_code == 422
+
+
+def test_more_images_than_the_ceiling_are_refused(client, images):
+    body = payload(images, images=[
+        {"image_id": f"i{n}", "image_url": f"{images}/img0.png"} for n in range(9)
+    ])
+    assert client.post("/v1/predict", json=body).status_code == 422
+
+
+def test_no_model_loaded_is_503(images):
+    unloaded = TestClient(build_app(lambda: None))
+    response = unloaded.post("/v1/predict", json=payload(images))
+    assert response.status_code == 503
+    assert response.json()["error_code"] == "SERVICE_UNAVAILABLE"
+
+
+def test_unfetchable_url_is_404(client, images):
+    body = payload(images)
+    body["images"][0]["image_url"] = f"{images}/absent.png"
+    response = client.post("/v1/predict", json=body)
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "IMAGE_NOT_FOUND"
+
+
+def test_fetched_but_undecodable_is_415(client, images):
+    body = payload(images)
+    body["images"][0]["image_url"] = f"{images}/notanimage.png"
+    response = client.post("/v1/predict", json=body)
+    assert response.status_code == 415
+    assert response.json()["error_code"] == "UNREADABLE_IMAGE"
+
+
+def test_the_deadline_produces_504(client, images, monkeypatch):
+    monkeypatch.setenv("PHYSIS_DEADLINE_MS", "0")
+    response = client.post("/v1/predict", json=payload(images))
+    assert response.status_code == 504
+    assert response.json()["error_code"] == "INFERENCE_TIMEOUT"
+
+
+def test_an_unexpected_error_never_leaks_internals(images):
+    def explode():
+        raise RuntimeError("/secret/path/to/checkpoint.pt")
+
+    broken = TestClient(build_app(explode), raise_server_exceptions=False)
+    response = broken.post("/v1/predict", json=payload(images))
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error_code"] == "INTERNAL_ERROR"
+    assert "secret" not in json.dumps(body)
+
+
+# --- SSRF -----------------------------------------------------------------
+#
+# The service fetches a URL a caller supplies, from inside a network the caller
+# cannot reach. Authentication narrows who can ask; it does not make the request
+# safe.
+
+@pytest.mark.parametrize("url", [
+    "http://example.com/x.png",            # plain http
+    "https://127.0.0.1/x.png",             # loopback
+    "https://localhost/x.png",
+    "https://169.254.169.254/latest/meta",  # cloud metadata
+    "https://10.0.0.5/x.png",              # private
+    "https://192.168.1.1/x.png",
+    "https://[::1]/x.png",
+])
+def test_dangerous_urls_are_refused(url, monkeypatch):
+    monkeypatch.delenv("PHYSIS_ALLOW_LOOPBACK_FETCH", raising=False)
+    with pytest.raises(fetch.ImageFetchError):
+        fetch.check_url(url)
+
+
+def test_the_allowlist_matches_hosts_and_subdomains_only(monkeypatch):
+    monkeypatch.delenv("PHYSIS_ALLOW_LOOPBACK_FETCH", raising=False)
+    allow = ("r2.dev",)
+    fetch.check_url("https://bucket.r2.dev/x.png", allowlist=allow)
+    # A bare endswith would wave this through.
+    with pytest.raises(fetch.ImageHostRejected):
+        fetch.check_url("https://evil-r2.dev/x.png", allowlist=allow)
+    with pytest.raises(fetch.ImageHostRejected):
+        fetch.check_url("https://example.com/x.png", allowlist=allow)
+
+
+def test_a_rejected_host_reaches_the_client_as_422(client, images, monkeypatch):
+    monkeypatch.setenv("PHYSIS_IMAGE_HOSTS", "r2.example")
+    monkeypatch.delenv("PHYSIS_ALLOW_LOOPBACK_FETCH", raising=False)
+    body = payload(images)
+    body["images"][0]["image_url"] = "https://example.com/x.png"
+    response = client.post("/v1/predict", json=body)
+    assert response.status_code == 422
+    assert response.json()["errors"][0]["field"] == "image_url"
+
+
+def test_the_byte_ceiling_is_enforced(images):
+    with pytest.raises(fetch.ImageTooLarge):
+        fetch.fetch_image(f"{images}/img0.png", max_bytes=64)
+
+
+def test_a_presigned_url_is_never_logged_whole():
+    url = "https://bucket.r2.dev/uploads/x.png?X-Amz-Signature=deadbeef&X-Amz-Expires=900"
+    redacted = fetch.redact(url)
+    assert "Signature" not in redacted and "deadbeef" not in redacted
+    # The path identifies the object and is safe to keep.
+    assert redacted == "https://bucket.r2.dev/uploads/x.png"
+    # Port survives, credentials in a userinfo prefix do not.
+    assert fetch.redact("https://u:pw@host:8443/a.png") == "https://host:8443/a.png"
+
+
+def test_loopback_escape_hatch_is_loopback_only(monkeypatch):
+    monkeypatch.setenv("PHYSIS_ALLOW_LOOPBACK_FETCH", "1")
+    fetch.check_url("http://127.0.0.1:8000/x.png")
+    # The addresses an SSRF attempt actually wants stay blocked.
+    with pytest.raises(fetch.ImageHostRejected):
+        fetch.check_url("http://169.254.169.254/latest/meta")
+    with pytest.raises(fetch.ImageHostRejected):
+        fetch.check_url("http://10.0.0.5/x.png")
+
+
+# --- OpenAPI --------------------------------------------------------------
+
+def test_openapi_describes_exactly_the_runtime(client):
+    spec = client.get("/openapi.json").json()
+    assert set(spec["paths"]) == {"/", "/v1/health", "/v1/predict"}
+
+    predict = spec["paths"]["/v1/predict"]["post"]
+    assert predict["security"], "bearer auth missing from the security scheme"
+    assert set(predict["responses"]) >= {
+        "200", "401", "404", "413", "415", "422", "429", "500", "503", "504"
+    }
+    # `"schema": {}` for a 200 is the defect this replaces.
+    assert predict["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+
+    request = spec["components"]["schemas"]["PredictRequest"]
+    assert set(request["required"]) == {"study_id", "age_years", "images"}
+    assert request["properties"]["age_years"]["minimum"] == 0.2
+    assert request["properties"]["age_years"]["maximum"] == 19.0
+
+
+def test_no_cors_header_is_advertised(client, images):
+    """Server to server. A browser is not a client, so the header is surface
+    with no user."""
+    response = client.post(
+        "/v1/predict",
+        json=payload(images),
+        headers={"Origin": "https://physis.example"},
+    )
+    assert "access-control-allow-origin" not in {k.lower() for k in response.headers}
 
 
 # --- preprocessing --------------------------------------------------------
 
-def test_rgb_upload_is_accepted(client):
-    array = (np.random.rand(400, 300, 3) * 255).astype(np.uint8)
-    buffer = io.BytesIO()
-    Image.fromarray(array).save(buffer, format="PNG")
-    payload = study_payload()
-    payload["images"][0]["content"] = b64(buffer.getvalue())
-    assert client.post("/v1/score/study", json=payload).status_code == 200
+def test_rgb_upload_is_accepted(client, images):
+    """A PACS export re-saved as RGB PNG is a normal thing to receive."""
+    body = payload(images)
+    body["images"][0]["image_url"] = f"{images}/rgb.png"
+    assert client.post("/v1/predict", json=body).status_code == 200
 
 
 def test_preprocess_pads_to_the_canvas_and_reports_geometry():
@@ -322,16 +518,12 @@ def test_preprocessed_upload_keeps_padding_out_of_the_mask():
     prepared = preprocess(canvas)
     assert prepared["geometry"]["already_preprocessed"] is True
     mask = prepared["valid_mask"]
-    # No valid patch may start before the content does.
     first_valid_column = int(np.flatnonzero(mask.any(axis=0))[0])
     assert first_valid_column * 16 >= pad_x
 
 
 def test_a_real_upload_is_not_mistaken_for_a_preprocessed_one():
     assert detect_preprocessed(np.random.rand(500, 380).astype(np.float32)) is None
-    # A 384 canvas with no zero border cannot be told from an ordinary upload,
-    # and does not need to be: with no padding the normal path already gives
-    # scale 1, pad 0, and every patch valid.
     assert detect_preprocessed(np.full((384, 384), 0.5, dtype=np.float32)) is None
     prepared = preprocess(np.full((384, 384), 0.5, dtype=np.float32))
     assert prepared["geometry"]["pad_x"] == 0
@@ -342,7 +534,6 @@ def test_detection_is_never_wider_than_the_truth():
     """Losing an edge patch is acceptable; admitting a padding patch is not."""
     for new_w in (150, 255, 300, 384):
         canvas, pad_x, pad_y = padded_canvas(new_w, 384)
-        # Darken the outer content column, as the 1st-percentile clip can.
         canvas[:, pad_x] = 0.0
         found = detect_preprocessed(canvas)
         if found is None:
@@ -359,126 +550,3 @@ def test_percentile_never_leaves_the_unit_interval():
     assert percentile_for(1e6, entry) == 1.0
     assert percentile_for(-1e6, entry) == 0.0
     assert 0.0 <= percentile_for(0.0, entry) <= 1.0
-
-
-def test_cross_origin_requests_are_allowed(client):
-    """A browser on another origin is the only client that matters here."""
-    response = client.options(
-        "/v1/score/study",
-        headers={
-            "Origin": "https://physis.example",
-            "Access-Control-Request-Method": "POST",
-        },
-    )
-    assert response.status_code in (200, 204)
-    assert "access-control-allow-origin" in {k.lower() for k in response.headers}
-
-
-# --- /v1/predict, the shape the web client was built against ----------------
-
-
-def serve_one_image(tmp_path, name="img0.png"):
-    """A tiny http server standing in for a presigned R2 URL."""
-    import functools
-    import http.server
-    import threading
-
-    array = np.zeros((384, 384), dtype=np.uint16)
-    array[:, 64:320] = 40000
-    Image.fromarray(array).save(tmp_path / name)
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(tmp_path))
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, f"http://127.0.0.1:{server.server_address[1]}/{name}"
-
-
-def predict_payload(url, **overrides):
-    payload = {
-        "study_id": "0001_01",
-        "age_years": 11.5,
-        "sex": "male",
-        "images": [
-            {"image_id": "img0", "image_url": url, "view": "LATERAL", "laterality": "left"}
-        ],
-    }
-    payload.update(overrides)
-    return payload
-
-
-def test_predict_returns_the_envelope_the_client_expects(client, tmp_path):
-    server, url = serve_one_image(tmp_path)
-    try:
-        body = client.post("/v1/predict", json=predict_payload(url)).json()
-    finally:
-        server.shutdown()
-    assert body["success"] is True
-    data = body["data"]
-    assert {"study_id", "triage_score", "priority_percentile", "age_band",
-            "images", "inference_time_ms", "model_version"} <= set(data)
-
-
-def test_predict_percentile_is_on_a_hundred(client, tmp_path):
-    """The web UI prints it with a percent sign and filters at 80 and 95."""
-    server, url = serve_one_image(tmp_path)
-    try:
-        data = client.post("/v1/predict", json=predict_payload(url)).json()["data"]
-    finally:
-        server.shutdown()
-    assert 0.0 <= data["priority_percentile"] <= 100.0
-    native = client.post("/v1/score/study", json=study_payload()).json()
-    assert 0.0 <= native["priority_percentile"] <= 1.0
-
-
-def test_predict_returns_null_for_the_quantities_that_no_longer_exist(client, tmp_path):
-    """Null, not omitted: absent reads as an oversight rather than an answer."""
-    server, url = serve_one_image(tmp_path)
-    try:
-        data = client.post("/v1/predict", json=predict_payload(url)).json()["data"]
-    finally:
-        server.shutdown()
-    image = data["images"][0]
-    for field in ("implicit_age", "implicit_age_gap", "surprise_map", "implicit_age_map"):
-        assert field in image and image[field] is None
-    assert "boxes" in image
-
-
-@pytest.mark.parametrize(
-    "overrides,code",
-    [
-        ({"age_years": None}, "VALIDATION_ERROR"),
-        ({"study_id": None}, "VALIDATION_ERROR"),
-        ({"images": []}, "VALIDATION_ERROR"),
-    ],
-)
-def test_predict_errors_carry_the_envelope(client, tmp_path, overrides, code):
-    """`finalizeStudy` branches on `success`, not on the status code."""
-    server, url = serve_one_image(tmp_path)
-    try:
-        body = client.post("/v1/predict", json=predict_payload(url, **overrides)).json()
-    finally:
-        server.shutdown()
-    assert body["success"] is False
-    assert body["error_code"] == code
-    assert body["message"]
-
-
-def test_predict_unreachable_image_is_reported_not_raised(client, tmp_path):
-    server, url = serve_one_image(tmp_path)
-    try:
-        missing = url.replace("img0.png", "absent.png")
-        body = client.post("/v1/predict", json=predict_payload(missing)).json()
-    finally:
-        server.shutdown()
-    assert body["success"] is False
-    assert body["error_code"] == "IMAGE_NOT_FOUND"
-
-
-def test_predict_says_so_when_no_model_is_loaded(tmp_path):
-    unloaded = TestClient(build_app(lambda: None))
-    server, url = serve_one_image(tmp_path)
-    try:
-        body = unloaded.post("/v1/predict", json=predict_payload(url)).json()
-    finally:
-        server.shutdown()
-    assert body["success"] is False
-    assert body["error_code"] == "SERVICE_UNAVAILABLE"

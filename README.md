@@ -17,9 +17,9 @@ Pediatric wrist radiographs are hard to read because normal anatomy moves with a
 
 ## What this is, as a product
 
-Physis reorders the queue a radiologist reads in the morning. It does not diagnose. The on-call physician who treats the child overnight never sees a model output, and there is no API profile that would let them.
+Physis reorders the queue a radiologist reads in the morning. It does not diagnose. The on-call physician who treats the child overnight never sees a model output, and has no account that could show them one.
 
-That separation is a regulatory position, not a design preference. The claim follows computer-aided triage and notification (21 CFR 892.2080), which permits prioritizing a worklist but not marking locations on the original image for the treating clinician. The service enforces it: a client asking for the `triage` profile receives scores and ranking with no location data at all, and can therefore never leak a box into the worklist by accident.
+That separation is a regulatory position, not a design preference. The claim follows computer-aided triage and notification (21 CFR 892.2080), which permits prioritizing a worklist but not marking locations on the original image for the treating clinician. What enforces it is the role model rather than an API flag: the application has accounts for radiologists and administrators and none at all for the on-call physician, so there is no screen for a box to reach.
 
 When the service is down, the worklist reverts to arrival order. Nothing in the clinical workflow is allowed to depend on this system being up.
 
@@ -115,7 +115,7 @@ Faster R-CNN with a ResNet50-FPN v2 backbone, COCO-initialized, one class. Not Y
 
 The original plan was to fine-tune the detector from the Stage A backbone. Stage A cost a classifier 0.21 AUROC as an initializer, so COCO weights were used instead and the substitution is stated rather than made quietly.
 
-The detector fills the `radiologist` profile only. It costs about a second per image on CPU against the classifier's 79 ms, and the worklist is not permitted to display location anyway, so the ranking path never runs it. The triage score stays with the calibrated classifier, so adding a detector changed no measurement that was already reported.
+The detector costs about a second per image on CPU against the classifier's 79 ms, so it is a separate pass the scorer can be asked to skip. The triage score stays with the calibrated classifier either way, so adding a detector changed no measurement that was already reported.
 
 ### How everything is evaluated
 
@@ -262,10 +262,20 @@ modal deploy modal_app.py
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/health` | provenance: checkpoint, temperature, calibration, whether a detector is loaded |
-| `POST /v1/score/study` | the primary call, one or more images of the same patient |
-| `POST /v1/score/image` | a study of one, for demos |
-| `POST /v1/predict` | compatibility shape for the web client, with a `{success, data}` envelope |
+| `GET /` | service information |
+| `GET /v1/health` | liveness, public and thin |
+| `POST /v1/predict` | inference, bearer authenticated |
+
+One inference route, not three. Earlier versions also served `/v1/score/study`
+and `/v1/score/image` onto the same scorer, which meant a second public request
+shape built around object keys and integer view codes for no client that
+existed. Types are Pydantic models, so `/openapi.json` is generated from the
+same definitions the runtime enforces and the two cannot drift.
+
+The service fetches presigned image URLs, which keeps bucket credentials out of
+it. Fetching a URL a caller supplies is also an SSRF surface, so the fetch
+refuses plain http, any host outside `PHYSIS_IMAGE_HOSTS`, any hostname
+resolving to a loopback, private or link-local address, and any redirect.
 
 A study is scored as the maximum over its images, because a wrist examination is normally a posteroanterior and a lateral projection and one suspicious projection is enough to raise a case. Scoring images in isolation cannot produce a queue.
 
@@ -274,7 +284,7 @@ A study is scored as the maximum over its images, because a wrist examination is
 Exercise it against real test-fold studies, which the script selects deliberately so that positives carry no cast and negatives come from the strictly clean set:
 
 ```bash
-.venv/bin/python scripts/try_service.py --profile radiologist
+.venv/bin/python scripts/try_service.py
 ```
 
 ## Repository layout

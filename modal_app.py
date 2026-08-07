@@ -23,6 +23,7 @@ everything downstream is arithmetic over the saved sweep archives.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 import sys
@@ -318,7 +319,33 @@ def score(split: str, name: str = "base") -> None:
     )
 
 
-@app.function(volumes=VOLUMES, timeout=HOUR, cpu=2.0, min_containers=0)
+@app.function(
+    volumes=VOLUMES,
+    timeout=HOUR,
+    cpu=2.0,
+    min_containers=0,
+    # Bearer authentication. Create the secret once, then every deploy picks it
+    # up regardless of which machine runs the deploy:
+    #
+    #   modal secret create physis-api-key PHYSIS_API_KEY=<key>
+    #
+    # A named secret rather than reading the deployer's environment. Reading the
+    # environment means a colleague who deploys without the variable set ships a
+    # secret holding an empty string, which turns authentication off silently
+    # and leaves a public URL unguarded. This way a missing secret fails the
+    # deploy instead, and `required_keys` fails it again if the secret exists
+    # but is missing the key.
+    secrets=[modal.Secret.from_name("physis-api-key", required_keys=["PHYSIS_API_KEY"])],
+    # Which hosts /v1/predict may fetch an image from. Empty permits any public
+    # host, which still blocks loopback, private ranges and the link-local
+    # metadata endpoint; narrowing it to the R2 hostname closes the rest. Set it
+    # here rather than in a secret because it is configuration, not a
+    # credential, and a reader of this file should be able to see it.
+    #
+    # PHYSIS_ALLOW_LOOPBACK_FETCH is deliberately absent. It is a development
+    # flag for serving test images off a laptop and has no business here.
+    env={"PHYSIS_IMAGE_HOSTS": os.environ.get("PHYSIS_IMAGE_HOSTS", "")},
+)
 @modal.concurrent(max_inputs=8)
 @modal.asgi_app()
 def web():

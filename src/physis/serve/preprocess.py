@@ -48,7 +48,11 @@ def load_grayscale(data: bytes | str) -> tuple[np.ndarray, float]:
         source = Image.open(data if isinstance(data, str) else _as_stream(data))
         array = np.asarray(source)
     except Exception as error:  # noqa: BLE001 - any decode failure is the same 415
-        raise UnreadableImage(str(error)) from error
+        # PIL's message for undecodable bytes embeds the repr of the stream,
+        # which puts a memory address in an HTTP error body: noise for the
+        # client, and internals it has no use for. The original is chained, so
+        # the server traceback still has it.
+        raise UnreadableImage("not a decodable image") from error
 
     if array.ndim == 3:
         # RGB or RGBA upload: collapse to luminance rather than refusing, since a

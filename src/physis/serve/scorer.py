@@ -61,7 +61,7 @@ class Scorer:
         self.model.load_state_dict(state["model"])
         self.model = self.model.to(self.device).eval()
 
-        # Optional, and only ever run for the radiologist profile. It costs about
+        # Optional, and skipped when `localize=False`. It costs about
         # a second per image on CPU against the classifier's 79 ms, so putting it
         # on the worklist path would make ranking a queue twelve times slower for
         # information the worklist is not allowed to show anyway.

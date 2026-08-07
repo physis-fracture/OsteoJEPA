@@ -14,6 +14,7 @@ Then: http://127.0.0.1:8000/docs
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -43,6 +44,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--token",
+        default=None,
+        help="require this bearer token on the scoring endpoints; "
+             "defaults to PHYSIS_API_KEY, unset means open",
+    )
     parser.add_argument("--set", nargs="*", default=[])
     return parser.parse_args()
 
@@ -64,11 +71,24 @@ def main() -> None:
     if args.detector and detector is None:
         print(f"no detector at {args.detector}; serving without localization")
 
+    # The auth dependency reads the environment, so --token is a convenience
+    # over exporting it, not a second mechanism.
+    if args.token is not None:
+        os.environ["PHYSIS_API_KEY"] = args.token
+
+    # /v1/predict fetches presigned https URLs, which a laptop cannot mint. The
+    # local service accepts plain http to loopback so try_service.py can serve
+    # test images from a throwaway server. Loopback only: the addresses an SSRF
+    # attempt wants are link-local and private, and both stay blocked. The Modal
+    # deployment never sets this.
+    os.environ.setdefault("PHYSIS_ALLOW_LOOPBACK_FETCH", "1")
+
     scorer = Scorer(cfg, args.checkpoint, args.calibration, device=args.device,
                     detector_checkpoint=detector)
     print(f"loaded {args.checkpoint} on {args.device}")
     print(f"model: {scorer.model_info()}")
-    print(f"listening on http://{args.host}:{args.port}  (docs at /docs)")
+    auth = "bearer token required" if os.environ.get("PHYSIS_API_KEY", "").strip() else "open"
+    print(f"listening on http://{args.host}:{args.port}  (docs at /docs, {auth})")
 
     import uvicorn
 

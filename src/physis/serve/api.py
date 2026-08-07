@@ -1,213 +1,190 @@
-"""The HTTP surface, implementing .agents/API_CONTRACT.md.
+"""The HTTP surface. Three routes, one of them doing the work.
 
-The two response profiles are enforced here rather than left to client
-discipline. The device claim is computer-aided triage and notification
-(21 CFR 892.2080), which permits prioritizing images but not marking locations
-on the original image, so a client that only ever asks for `triage` cannot leak
-location information into the worklist by accident.
+    GET  /              service information
+    GET  /v1/health     liveness, public and thin
+    POST /v1/predict    inference, bearer authenticated
 
-The `radiologist` profile carries fracture boxes when a detector is loaded, and
-`localization: null` when one is not. OsteoJEPA's surprise map returned a null
-result and never filled that field; a map that does not localize is worse than
-no map.
+`/v1/score/study` and `/v1/score/image` are gone. They scored through the same
+`Scorer` as `/v1/predict` while exposing a second request contract built around
+internal concepts: object keys, integer view codes, M/F/O, and a `profile`
+switch. Nothing in the product used them.
 
-Only this profile runs the detector. It costs about a second per image against
-the classifier's 79 ms, and the worklist is not permitted to show location
-anyway, so putting it on the ranking path would buy nothing and cost twelve
-times the latency.
+The regulatory position did not live in that switch. The device claim is
+computer-aided triage and notification (21 CFR 892.2080), which permits
+prioritizing a worklist but not marking locations on the image for the treating
+clinician. What enforces it is that the on-call physician has no account: the
+role model is `radiologist | admin`, and the worklist reads scores from the
+application's own database rather than calling this service at all. A profile
+parameter on an endpoint the worklist never calls was never what was holding
+that line.
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
+import hmac
+import logging
 import os
-import time
-from typing import Any, Literal
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import compat
-from .preprocess import UnreadableImage
-from .scorer import AgeRequired, Scorer
+from . import predict as predict_route
+from .schemas import ErrorResponse, HealthResponse, ServiceInfo
+
+log = logging.getLogger("physis.api")
+
+CONTRACT_VERSION = "1.1"
+
+# Declared on the route so `/openapi.json` carries the security scheme and
+# `/docs` grows an Authorize button. auto_error off: the 401 body has to be the
+# project envelope, not FastAPI's `{"detail": ...}`.
+security = HTTPBearer(auto_error=False, description="Server-to-server API key")
+
+PREDICT_RESPONSES: dict = {
+    401: {"model": ErrorResponse, "description": "Missing or invalid bearer token"},
+    404: {"model": ErrorResponse, "description": "Image could not be fetched"},
+    413: {"model": ErrorResponse, "description": "Image exceeds the size ceiling"},
+    415: {"model": ErrorResponse, "description": "Fetched, but not a decodable image"},
+    422: {"model": ErrorResponse, "description": "Invalid request"},
+    429: {"model": ErrorResponse, "description": "Server at capacity"},
+    500: {"model": ErrorResponse, "description": "Unexpected server error"},
+    503: {"model": ErrorResponse, "description": "No model loaded"},
+    504: {"model": ErrorResponse, "description": "Inference deadline exceeded"},
+}
 
 
-class ImageIn(BaseModel):
-    image_id: str
-    r2_key: str | None = None
-    content: str | None = None
-    view: int | None = None
-    laterality: Literal["L", "R"] | None = None
+def envelope(status_code: int, code: str, message: str, errors=None) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "message": message,
+            "error_code": code,
+            "errors": errors or [],
+        },
+    )
 
 
-class StudyIn(BaseModel):
-    study_id: str | None = None
-    profile: Literal["triage", "radiologist"] = "triage"
-    images: list[ImageIn] = Field(default_factory=list)
-    age_years: float | None = None
-    sex: Literal["M", "F", "O"] | None = None
+def api_key() -> str:
+    return os.environ.get("PHYSIS_API_KEY", "").strip()
 
 
-def error(status: int, code: str, **extra: Any) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"error": code, **extra})
+def require_api_key(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> None:
+    """Bearer authentication, when PHYSIS_API_KEY is set.
 
+    Unset leaves the route open, which is what a local process wants and what
+    every client had before this existed. On Modal the key arrives from a named
+    secret, so a deploy without it fails rather than silently publishing an
+    unguarded endpoint.
 
-def fetch_object(key: str) -> bytes:
-    """Fetch an uploaded image by object key.
-
-    Configured through PHYSIS_OBJECT_BASE, an https prefix the key is appended
-    to. Unset means the deployment has no object store wired up, and the
-    contract's 404 is the honest answer: the service cannot read that key.
+    `hmac.compare_digest` rather than `==`: a byte-by-byte comparison returns
+    faster on a wrong first character than on a wrong last one, and that timing
+    difference is enough to recover a key one character at a time.
     """
-    base = os.environ.get("PHYSIS_OBJECT_BASE")
-    if not base:
-        raise FileNotFoundError("no object store configured")
-    import urllib.request
-
-    with urllib.request.urlopen(base.rstrip("/") + "/" + key.lstrip("/")) as response:
-        return response.read()
-
-
-def resolve_image(image: ImageIn) -> bytes:
-    if bool(image.r2_key) == bool(image.content):
-        raise ValueError("image_source_ambiguous")
-    if image.content:
-        try:
-            return base64.b64decode(image.content, validate=True)
-        except (binascii.Error, ValueError) as err:
-            raise UnreadableImage(str(err)) from err
-    return fetch_object(image.r2_key)
+    expected = api_key()
+    if not expected:
+        return
+    if (
+        credentials is None
+        or credentials.scheme.lower() != "bearer"
+        or not hmac.compare_digest(credentials.credentials.strip(), expected)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def build_app(scorer_factory) -> FastAPI:
     """`scorer_factory` is a callable returning a Scorer, or None when unloaded."""
-    app = FastAPI(title="Physis triage", version="1.1")
-
-    # The web client is a browser on a different origin, so without this every
-    # request is refused by the browser before it reaches the service - and the
-    # failure looks like the API being down rather than a policy decision.
-    # PHYSIS_CORS_ORIGINS is a comma-separated allowlist; "*" is the demo default
-    # and should be narrowed to the app's origin for anything longer-lived.
-    origins = [
-        origin.strip()
-        for origin in os.environ.get("PHYSIS_CORS_ORIGINS", "*").split(",")
-        if origin.strip()
-    ]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=origins,
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
+    app = FastAPI(
+        title="Physis triage API",
+        version=CONTRACT_VERSION,
+        description=(
+            "Pediatric wrist fracture triage. Orders a radiologist's reading "
+            "queue by risk; it does not diagnose, and the absence of a box is "
+            "not evidence of the absence of a fracture."
+        ),
     )
 
-    @app.get("/")
-    def root():
-        """A landing page, so an integrator who guesses the base URL is not met
-        with a bare 404 and left wondering whether the service is up."""
-        scorer = scorer_factory()
-        return {
-            "service": "Physis triage",
-            "contract": "v1",
-            "status": "ok" if scorer is not None else "model_unavailable",
-            "docs": "/docs",
-            "endpoints": [
-                "GET  /v1/health",
-                "POST /v1/score/study",
-                "POST /v1/score/image",
-                "POST /v1/predict   (compatibility shape for the web client)",
-            ],
-            "note": (
-                "Triage and notification only. This service does not diagnose, "
-                "and the triage profile carries no location information."
-            ),
-        }
+    # No CORS. This is server to server: the Next.js server calls it, not a
+    # browser, so an Access-Control-Allow-Origin header would widen the surface
+    # without any client needing it. Authentication is the access boundary.
 
-    @app.get("/v1/health")
-    def health():
-        scorer = scorer_factory()
-        if scorer is None:
-            return error(503, "model_unavailable")
-        return {"status": "ok", "model": scorer.model_info()}
+    @app.exception_handler(RequestValidationError)
+    async def validation_failed(request: Request, exc: RequestValidationError):
+        """Pydantic's rejection, in the project's envelope.
 
-    @app.post("/v1/score/study")
-    def score_study(payload: StudyIn):
-        scorer = scorer_factory()
-        if scorer is None:
-            # The client falls back to arrival order for the whole worklist.
-            # Nothing in the clinical workflow may depend on this service.
-            return error(503, "model_unavailable")
+        FastAPI answers `{"detail": [...]}` by default. The client branches on
+        `success`, so that body reads as a successful response with every field
+        missing rather than as the validation failure it is.
+        """
+        errors = []
+        for error in exc.errors():
+            location = ".".join(str(part) for part in error.get("loc", ()) if part != "body")
+            errors.append({"field": location or None, "message": error["msg"]})
+        return envelope(422, "VALIDATION_ERROR", "Validation failed", errors)
 
-        if not payload.study_id:
-            return error(422, "study_id_required")
-        if not payload.images:
-            return error(422, "images_required")
-        try:
-            scorer.band_of(payload.age_years)
-        except AgeRequired as err:
-            # No default age. Scoring against the wrong band silently is worse
-            # than refusing.
-            return error(422, "age_required", detail=str(err))
-
-        prepared = []
-        for image in payload.images:
-            try:
-                prepared.append({
-                    "data": resolve_image(image),
-                    "image_id": image.image_id,
-                    "view": image.view,
-                    "laterality": image.laterality,
-                })
-            except ValueError as err:
-                if str(err) == "image_source_ambiguous":
-                    return error(422, "image_source_ambiguous", image_id=image.image_id)
-                return error(415, "unreadable_image", image_id=image.image_id)
-            except FileNotFoundError:
-                return error(404, "object_not_found", image_id=image.image_id)
-            except Exception:  # noqa: BLE001 - any fetch failure is the same 404
-                return error(404, "object_not_found", image_id=image.image_id)
-
-        # A deadline the service owns, so a slow response becomes a 504 the
-        # client can fall back from rather than a hung worklist. Fetching the
-        # uploads already happened, so the budget covers what is left.
-        budget_ms = float(os.environ.get("PHYSIS_DEADLINE_MS", 30000))
-        started = time.perf_counter()
-        try:
-            result = scorer.score_study(
-                prepared,
-                study_id=payload.study_id,
-                age_years=payload.age_years,
-                sex=payload.sex,
-                localize=payload.profile == "radiologist",
-            )
-        except UnreadableImage as err:
-            return error(415, "unreadable_image", detail=str(err))
-        if (time.perf_counter() - started) * 1000.0 > budget_ms:
-            return error(504, "timeout", budget_ms=budget_ms)
-
-        if payload.profile == "radiologist" and result.get("localization") is None:
-            # No detector loaded. Present and empty on purpose rather than
-            # absent, so a client can tell "no boxes found" from "this
-            # deployment cannot localize".
-            result["localization"] = None
-            result["localization_note"] = (
-                "no detector loaded in this deployment"
-            )
-        return result
-
-    @app.post("/v1/score/image")
-    def score_image(payload: StudyIn):
-        if len(payload.images) != 1:
-            return error(422, "single_image_required")
-        payload.study_id = payload.study_id or payload.images[0].image_id
-        response = score_study(payload)
-        if isinstance(response, JSONResponse):
-            return response
-        response.pop("triage_score", None)
+    @app.exception_handler(HTTPException)
+    async def http_error(request: Request, exc: HTTPException):
+        codes = {401: "UNAUTHORIZED", 404: "NOT_FOUND", 405: "METHOD_NOT_ALLOWED"}
+        response = envelope(
+            exc.status_code,
+            codes.get(exc.status_code, "ERROR"),
+            str(exc.detail),
+        )
+        for key, value in (exc.headers or {}).items():
+            response.headers[key] = value
         return response
 
-    compat.register(app, scorer_factory)
+    @app.exception_handler(Exception)
+    async def unexpected(request: Request, exc: Exception):
+        """Never let an exception reach the client.
+
+        A traceback names filesystem paths, checkpoint locations and sometimes
+        argument values. The log keeps all of it; the response says nothing.
+        """
+        log.exception("unhandled error on %s", request.url.path)
+        return envelope(500, "INTERNAL_ERROR", "An unexpected server error occurred.")
+
+    @app.get("/", response_model=ServiceInfo, summary="Service information")
+    def root():
+        return {
+            "service": "Physis triage inference",
+            "version": CONTRACT_VERSION,
+            "health": "/v1/health",
+            "docs": "/docs",
+        }
+
+    @app.get(
+        "/v1/health",
+        response_model=HealthResponse,
+        summary="Liveness",
+        description=(
+            "Public and deliberately thin. Model provenance is on the "
+            "authenticated response, which carries model_version."
+        ),
+    )
+    def health():
+        loaded = scorer_factory() is not None
+        return JSONResponse(
+            status_code=200 if loaded else 503,
+            content={
+                "status": "ok" if loaded else "model_unavailable",
+                "contract_version": CONTRACT_VERSION,
+            },
+        )
+
+    app.include_router(
+        predict_route.build_router(scorer_factory, PREDICT_RESPONSES),
+        dependencies=[Depends(require_api_key)],
+    )
     return app
+
+
+__all__ = ["build_app", "require_api_key", "CONTRACT_VERSION", "PREDICT_RESPONSES"]
