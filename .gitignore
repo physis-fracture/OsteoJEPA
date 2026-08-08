@@ -243,4 +243,5 @@ docs/RESULTS.md
 docs/WEB_INTEGRATION.md
 # Exported demo studies (regenerate with scripts/export_demo_set.py)
 demo_set/
+docs/ARCHITECTURE.md
 
