@@ -4,14 +4,14 @@
 
 ### Fracture triage for pediatric wrist radiographs, where "normal" is a function of the child's age rather than a single class.
 
-![Architecture illustration.](docs/picture/architecture-illustration.png)
-
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.7%2B-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Modal](https://img.shields.io/badge/Modal-serverless%20GPU-7B3FE4)](https://modal.com/)
 [![Dataset](https://img.shields.io/badge/Dataset-GRAZPEDWRI--DX-blueviolet)](https://figshare.com/articles/dataset/GRAZPEDWRI-DX/14825193)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+![Architecture illustration.](docs/picture/architecture-illustration.png)
 
 Pediatric wrist radiographs are hard to read because normal anatomy moves with age. A growth plate looks like a fracture line, and where it sits changes from one year to the next. OsteoJEPA was the proposed answer: condition a joint-embedding predictive architecture on age inside the predictor rather than the encoder, sweep candidate ages at inference, and score each patch by how much the freedom to pick an age helps explain what is there. Normal anatomy that looks unusual should have some other age that explains it. A fracture should have none. The idea did not work, and most of this repository is the record of finding that out honestly: the predictor never beat a constant baseline, and the signal it did produce sat on the outline of the limb rather than on bone. What ships instead is a supervised ViT-S/16 classifier at study AUROC 0.9580, temperature-calibrated to ECE 0.0416, alongside a Faster R-CNN detector at mAP@50 0.8298, served behind a FastAPI endpoint that orders a radiologist's reading queue and shows the on-call physician nothing before they decide.
 
