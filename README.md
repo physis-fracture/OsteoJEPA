@@ -4,7 +4,7 @@
 
 ### Fracture triage for pediatric wrist radiographs, where "normal" is a function of the child's age rather than a single class.
 
-![Architecture illustration.](docs/picture/architecture.png)
+![Architecture illustration.](docs/picture/architecture-illustration.png)
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.7%2B-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
