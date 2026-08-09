@@ -1,5 +1,7 @@
 <div align="center">
 
+<!-- <img src="docs/picture/Logo Physis.png" width="50%" /> -->
+
 # OsteoJEPA
 
 ### Fracture triage for pediatric wrist radiographs, where "normal" is a function of the child's age rather than a single class.
@@ -26,6 +28,8 @@ That separation is a regulatory position, not a design preference. The claim fol
 When the service is down, the worklist reverts to arrival order. Nothing in the clinical workflow is allowed to depend on this system being up.
 
 ## Methodology
+
+![Pipeline.](docs/picture/pipeline.png)
 
 Two model families live in this repository, and only one of them works. Both are documented, because the one that failed is where the interesting result is.
 
