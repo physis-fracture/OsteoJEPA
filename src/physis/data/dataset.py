@@ -105,6 +105,7 @@ def pick_demo_studies(
     *,
     split: str = "test",
     offline_scores: str | Path | None = None,
+    exclude_patients: frozenset | set | None = None,
 ) -> pd.DataFrame:
     """Test-fold studies chosen so a demo shows the model, not its shortcut.
 
@@ -120,9 +121,15 @@ def pick_demo_studies(
     sure about. That is demo selection, not evaluation: ranking by the model's
     own score and then reporting how well it did would be circular.
 
+    `exclude_patients` drops whole patients, not studies. Excluding by study
+    would let a second draw return the other wrist of a child already in the
+    first, which is not a fresh case to look at.
+
     Returns one row per study with `truth`, `age` and `n_images`.
     """
     rows = manifest[manifest["split"] == split]
+    if exclude_patients:
+        rows = rows[~rows["patient_id"].isin(exclude_patients)]
     by_study = rows.groupby("study_id").agg(
         boxes=("n_fracture_box", "max"),
         cast=("tag_cast", "max"),

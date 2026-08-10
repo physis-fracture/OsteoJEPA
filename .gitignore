@@ -228,6 +228,9 @@ data/README.md
 data/summary.json
 runs
 demo_set.zip
+demo_set_2.zip
+demo_set_2
+demo_set_sent
 
 # Agents
 .agents/*
@@ -248,3 +251,4 @@ docs/FIGURE_PROMPT.md
 docs/FIGURE2_DEPLOYED.md
 docs/figures
 docs/paper
+docs/picture/Logo Physis.png

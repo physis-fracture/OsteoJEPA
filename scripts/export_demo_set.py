@@ -51,7 +51,29 @@ def parse_args() -> argparse.Namespace:
         help="pick the cases the model is surest about, for a recording",
     )
     parser.add_argument("--scores", default="artifacts/clf/clf_main/rescored/scores_test.csv")
+    parser.add_argument(
+        "--exclude",
+        nargs="*",
+        default=[],
+        help="existing demo set directories whose patients to leave out",
+    )
     return parser.parse_args()
+
+
+def patients_in(directories, manifest: pd.DataFrame) -> set:
+    """Patient ids behind the studies of already-exported demo sets.
+
+    Patients rather than studies: a child can have more than one study, and the
+    other wrist of someone already exported is not a fresh case.
+    """
+    used = set()
+    for directory in directories:
+        listing = Path(directory) / "studies.csv"
+        if not listing.exists():
+            raise SystemExit(f"--exclude {directory}: no studies.csv there")
+        studies = set(pd.read_csv(listing)["study_id"])
+        used |= set(manifest[manifest["study_id"].isin(studies)]["patient_id"])
+    return used
 
 
 def main() -> None:
@@ -64,7 +86,12 @@ def main() -> None:
     if scores is not None and not Path(scores).exists():
         raise SystemExit(f"--confident needs {scores}; run score_classifier first")
 
-    chosen = pick_demo_studies(manifest, args.n, args.seed, offline_scores=scores)
+    excluded = patients_in(args.exclude, manifest)
+    if excluded:
+        print(f"excluding {len(excluded)} patients from {', '.join(args.exclude)}")
+    chosen = pick_demo_studies(
+        manifest, args.n, args.seed, offline_scores=scores, exclude_patients=excluded
+    )
 
     out = Path(args.out)
     (out / "images").mkdir(parents=True, exist_ok=True)
