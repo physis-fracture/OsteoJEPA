@@ -125,7 +125,7 @@ The detector costs about a second per image on CPU against the classifier's 79 m
 
 ### How everything is evaluated
 
-One protocol throughout, fixed before any model ran. GroupKFold on `patient_id` at seed 1337, fold 0 test, fold 1 val, folds 2 to 4 train. Every reported number is the test fold. Every threshold, the temperature, and the percentile reference come from validation only and are never refitted on test.
+One protocol throughout, fixed before any model ran. GroupKFold on `patient_id`, fold 0 test, fold 1 val, folds 2 to 4 train. The assignment is deterministic rather than seeded: scikit-learn's GroupKFold does not shuffle unless asked, so it reproduces from the patient ids alone. Seed 1337 governs training, not the split. Every reported number is the test fold. Every threshold, the temperature, and the percentile reference come from validation only and are never refitted on test.
 
 Patient-level grouping is the point rather than a detail. Splitting this dataset per image, as the published baselines on it do, puts the same child's left and right wrist on both sides of the split. That criticism is this project's own, so it was measured rather than asserted, on both model families and in both of their metrics.
 
@@ -152,7 +152,7 @@ data/
 └── images_384/           20,327 preprocessed 16-bit PNGs
 ```
 
-The split is GroupKFold on `patient_id` at seed 1337: fold 0 test, fold 1 val, folds 2 to 4 train.
+The split is GroupKFold on `patient_id`: fold 0 test, fold 1 val, folds 2 to 4 train. Deterministic, not seeded.
 
 | Split | Images | Studies |
 |---|---|---|
